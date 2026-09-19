@@ -14,6 +14,18 @@ import { JSONClient } from 'google-auth-library/build/src/auth/googleauth';
 type DriverLib = any;
 type DriverOptions = any;
 
+export interface IBigQueryResultEdit {
+  table: { label: string; schema?: string };
+  primaryKey: { [column: string]: any };
+  changes: { [column: string]: any };
+}
+
+export interface IBigQueryResultEditResponse {
+  success: boolean;
+  error?: string;
+  failedIndex?: number;
+}
+
 export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOptions> implements IConnectionDriver {
   public readonly deps: typeof AbstractDriver.prototype['deps'] = [
     {
@@ -143,6 +155,123 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
     return undefined;
   }
 
+  // BigQuery's job/column metadata doesn't include the source table, so a single, unambiguous
+  // FROM clause (optionally backtick-quoted, up to project.dataset.table) is required.
+  private getSingleTableSource(sql: string): { schema: string; table: string } | null {
+    const normalized = sql.replace(/\s+/g, ' ');
+    if (/\bJOIN\b|\bUNION\b|\bINTERSECT\b|\bEXCEPT\b|\bFROM\s*\(/i.test(normalized)) return null;
+    const match = normalized.match(/\bFROM\s+`?([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+){1,2})`?(?:\s+(?:AS\s+)?[A-Za-z_][\w$]*)?(?:\s|;|$)/i);
+    if (!match) return null;
+    const parts = match[1].split('.');
+    return { schema: parts[parts.length - 2], table: parts[parts.length - 1] };
+  }
+
+  private async resolveResultEditability(bigquery: any, cols: string[], sql: string, baseOptions: any) {
+    if (!cols.length) return { editable: false, nonEditableReason: 'Result has no columns.' };
+    const singleTable = this.getSingleTableSource(sql);
+    if (!singleTable) return { editable: false, nonEditableReason: 'Result does not identify one physical BigQuery table.' };
+    const { schema, table } = singleTable;
+
+    let knownColumns: Set<string>;
+    try {
+      const [job] = await bigquery.createQueryJob({ ...baseOptions, query: `SELECT column_name FROM \`${schema}\`.INFORMATION_SCHEMA.COLUMNS WHERE table_name = @table`, params: { table } });
+      const [rows] = await job.getQueryResults();
+      knownColumns = new Set(rows.map((row: any) => String(row.column_name).toUpperCase()));
+    } catch (error) {
+      return { editable: false, nonEditableReason: 'Unable to resolve table metadata for this result.' };
+    }
+    if (!knownColumns.size) return { editable: false, nonEditableReason: 'Result columns cannot be mapped to the source BigQuery table.' };
+
+    const resolvedSources = cols.map((name, index) => ({ index, sourceColumn: name, table, schema }));
+    if (resolvedSources.some(source => !knownColumns.has(String(source.sourceColumn).toUpperCase()))) {
+      return { editable: false, nonEditableReason: 'Result columns cannot be mapped to the source BigQuery table.' };
+    }
+
+    let primaryKeys: string[] = [];
+    try {
+      const [job] = await bigquery.createQueryJob({
+        ...baseOptions,
+        query: `SELECT kcu.column_name AS column_name
+                FROM \`${schema}\`.INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+                JOIN \`${schema}\`.INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
+                  ON tc.constraint_name = kcu.constraint_name
+                WHERE tc.table_name = @table AND tc.constraint_type = 'PRIMARY KEY'`,
+        params: { table },
+      });
+      const [rows] = await job.getQueryResults();
+      primaryKeys = rows.map((row: any) => String(row.column_name).toUpperCase());
+    } catch (error) {
+      // PK metadata unavailable/not enforced on this table - fall back to full-row matching
+      primaryKeys = [];
+    }
+
+    const includedColumns = new Set(resolvedSources.map(source => String(source.sourceColumn).toUpperCase()));
+    const columnMeta = resolvedSources.map(source => ({
+      name: cols[source.index],
+      sourceColumn: source.sourceColumn,
+      table: source.table,
+      schema: source.schema,
+      isPk: primaryKeys.includes(String(source.sourceColumn).toUpperCase()),
+      editable: !primaryKeys.includes(String(source.sourceColumn).toUpperCase()),
+    }));
+    if (primaryKeys.length && !primaryKeys.every(column => includedColumns.has(column))) {
+      return { columnMeta, editable: false, nonEditableReason: 'Result must include every primary key column.' };
+    }
+    return { columnMeta, editable: true };
+  }
+
+  private async _ensureSession(bigquery: any, baseOptions: any) {
+    if (this._sessionId) return this._sessionId;
+    const [job] = await bigquery.createQueryJob({ ...baseOptions, query: 'SELECT 1', createSession: true });
+    await job.getQueryResults();
+    const [metadata] = await job.getMetadata();
+    const sessionId = metadata?.statistics?.sessionInfo?.sessionId;
+    if (!sessionId) throw new Error('BigQuery did not return a session id.');
+    this._sessionId = sessionId;
+    return sessionId;
+  }
+
+  private async _runSessionQuery(bigquery: any, baseOptions: any, query: string, params?: any) {
+    const [job] = await bigquery.createQueryJob({ ...baseOptions, query, params, connectionProperties: this._buildConnectionProperties() });
+    const [rows] = await job.getQueryResults();
+    const [metadata] = await job.getMetadata();
+    return { rows, metadata };
+  }
+
+  public async applyEdits(edits: IBigQueryResultEdit[], _opt: any = {}): Promise<IBigQueryResultEditResponse> {
+    if (!edits.length) return { success: true };
+    const quoteIdentifier = (identifier: string) => `\`${identifier.replace(/`/g, '')}\``;
+    await this.open();
+    const bigquery = await this.connection;
+    const baseOptions: any = { location: this.credentials.location };
+    try {
+      await this._ensureSession(bigquery, baseOptions);
+      baseOptions.connectionProperties = this._buildConnectionProperties();
+      await this._runSessionQuery(bigquery, baseOptions, 'BEGIN TRANSACTION');
+      for (let index = 0; index < edits.length; index++) {
+        const { table, primaryKey, changes } = edits[index];
+        const changeColumns = Object.keys(changes);
+        const primaryKeyColumns = Object.keys(primaryKey);
+        if (!table?.label || !changeColumns.length || !primaryKeyColumns.length) throw new Error('Invalid edit request.');
+        const relation = [table.schema, table.label].filter(Boolean).map(quoteIdentifier).join('.');
+        const params: any = {};
+        const setClause = changeColumns.map((column, i) => { const key = `s${i}`; params[key] = changes[column]; return `${quoteIdentifier(column)} = @${key}`; }).join(', ');
+        const whereClause = primaryKeyColumns.map((column, i) => { const key = `w${i}`; params[key] = primaryKey[column]; return `${quoteIdentifier(column)} = @${key}`; }).join(' AND ');
+        const { metadata } = await this._runSessionQuery(bigquery, baseOptions, `UPDATE ${relation} SET ${setClause} WHERE ${whereClause}`, params);
+        const affected = Number(metadata?.statistics?.query?.dmlStats?.updatedRowCount ?? metadata?.statistics?.query?.numDmlAffectedRows ?? 0);
+        if (affected !== 1) {
+          await this._runSessionQuery(bigquery, baseOptions, 'ROLLBACK TRANSACTION').catch(() => undefined);
+          return { success: false, failedIndex: index, error: 'Row was modified or deleted since it was loaded.' };
+        }
+      }
+      await this._runSessionQuery(bigquery, baseOptions, 'COMMIT TRANSACTION');
+      return { success: true };
+    } catch (error) {
+      await this._runSessionQuery(bigquery, baseOptions, 'ROLLBACK TRANSACTION').catch(() => undefined);
+      return { success: false, error: error?.message || String(error) };
+    }
+  }
+
   private _buildDmlOutcomeMessage(statementType: string, metadata: any): string {
     const queryStats = metadata && metadata.statistics && metadata.statistics.query;
     let affected: number | undefined;
@@ -213,6 +342,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
       cols: standardizedRows && standardizedRows.length ? Object.keys(standardizedRows[0]) : ['No rows returned'],
       connId: this.getId(),
       messages: [{ date: new Date(), message }],
+      ...(await this.resolveResultEditability(bigquery, standardizedRows && standardizedRows.length ? Object.keys(standardizedRows[0]) : [], base, baseOptions).catch(() => ({ editable: false, nonEditableReason: 'Unable to resolve table metadata for this result.' }))),
       results: standardizedRows,
       query: rawSql,
       requestId: opt.requestId,
@@ -275,10 +405,13 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
         });
       }
     } else {
+      const cols = standardizedRows && standardizedRows.length && Object.keys(standardizedRows[0]);
+      const editability = await this.resolveResultEditability(bigquery, cols || [], rawSql, baseOptions).catch(() => ({ editable: false, nonEditableReason: 'Unable to resolve table metadata for this result.' }));
       resultsAgg.push({
-        cols: standardizedRows && standardizedRows.length && Object.keys(standardizedRows[0]),
+        cols,
         connId: this.getId(),
         messages: [{ date: new Date(), message: `Query executed successfully` }],
+        ...editability,
         results: standardizedRows,
         query: rawSql,
         requestId: opt.requestId,
