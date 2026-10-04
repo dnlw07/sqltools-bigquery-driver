@@ -9,7 +9,6 @@ import {
 import { v4 as generateId } from 'uuid';
 import queries from './queries';
 import { standardizeResult }  from './utils';
-import { JSONClient } from 'google-auth-library/build/src/auth/googleauth';
 
 type DriverLib = any;
 type DriverOptions = any;
@@ -40,12 +39,14 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
     },
   ];
 
-  queries = queries;
+  queries: any = queries;
 
   private _sessionId?: string;
   private _paginationCache?: Map<string, { total: number; exact: boolean; resultId: string }>;
+  private _bigqueryConnection: Promise<any> | null = null;
 
   public async open() {
+    if (this._bigqueryConnection) return this._bigqueryConnection;
     const BigQuery = this.requireDep('@google-cloud/bigquery').BigQuery;
     const OAuth2Client = this.requireDep('google-auth-library').OAuth2Client;
     const getCredentials = () => {
@@ -64,7 +65,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
 
         return {
           // is this a legit way to handle this typescript error
-          authClient: oauth as JSONClient,
+          authClient: oauth as any,
           projectId: this.credentials.projectId,
           location: this.credentials.location
         };
@@ -78,7 +79,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
 
     let connOptions = getCredentials();
 
-    this.connection = new Promise((resolve, reject) => {
+    const connection = new Promise<any>((resolve, reject) => {
       try {
         const bigquery = new BigQuery({ ...connOptions, maxRetries: 10 });
         resolve(bigquery);
@@ -86,10 +87,11 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
         reject(error);
       }
     });
+    this._bigqueryConnection = connection;
 
     const initSql = this.credentials.connectionInitSql;
     if (initSql && !this._sessionId) {
-      const bigquery = await this.connection;
+      const bigquery = await connection;
       try {
         const [job] = await bigquery.createQueryJob({
           query: initSql,
@@ -104,30 +106,30 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
         }
         this._sessionId = sessionId;
       } catch (error) {
-        this.connection = null;
-        throw new Error('Connection init SQL failed: ' + (error && error.message || error));
+        this._bigqueryConnection = null;
+        throw new Error('Connection init SQL failed: ' + (error instanceof Error ? error.message : String(error)));
       }
     }
+    return connection;
   }
 
 
   public async close() {
-    if (!this.connection) return Promise.resolve();
+    if (!this._bigqueryConnection) return Promise.resolve();
 
-    this.connection = null;
+    this._bigqueryConnection = null;
     this._sessionId = undefined;
     this._paginationCache = undefined;
   }
 
   public async testConnection() {
     try {
-      await this.open();
-      const bigquery = await this.connection;
+      const bigquery = await this.open();
       await bigquery.query('SELECT 1');
       await this.close();
 
     } catch (error) {
-      throw new Error('Failed to connect to BigQuery: ' + error.message);
+      throw new Error('Failed to connect to BigQuery: ' + (error instanceof Error ? error.message : String(error)));
     }
   }
 
@@ -212,7 +214,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
       table: source.table,
       schema: source.schema,
       isPk: primaryKeys.includes(String(source.sourceColumn).toUpperCase()),
-      editable: !primaryKeys.includes(String(source.sourceColumn).toUpperCase()),
+      editable: true,
     }));
     if (primaryKeys.length && !primaryKeys.every(column => includedColumns.has(column))) {
       return { columnMeta, editable: false, nonEditableReason: 'Result must include every primary key column.' };
@@ -241,8 +243,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
   public async applyEdits(edits: IBigQueryResultEdit[], _opt: any = {}): Promise<IBigQueryResultEditResponse> {
     if (!edits.length) return { success: true };
     const quoteIdentifier = (identifier: string) => `\`${identifier.replace(/`/g, '')}\``;
-    await this.open();
-    const bigquery = await this.connection;
+    const bigquery = await this.open();
     const baseOptions: any = { location: this.credentials.location };
     try {
       await this._ensureSession(bigquery, baseOptions);
@@ -253,7 +254,10 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
         const changeColumns = Object.keys(changes);
         const primaryKeyColumns = Object.keys(primaryKey);
         if (!table?.label || !changeColumns.length || !primaryKeyColumns.length) throw new Error('Invalid edit request.');
-        const relation = [table.schema, table.label].filter(Boolean).map(quoteIdentifier).join('.');
+        const relation = [table.schema, table.label]
+          .filter((identifier): identifier is string => typeof identifier === 'string' && identifier.length > 0)
+          .map(quoteIdentifier)
+          .join('.');
         const params: any = {};
         const setClause = changeColumns.map((column, i) => { const key = `s${i}`; params[key] = changes[column]; return `${quoteIdentifier(column)} = @${key}`; }).join(', ');
         const whereClause = primaryKeyColumns.map((column, i) => { const key = `w${i}`; params[key] = primaryKey[column]; return `${quoteIdentifier(column)} = @${key}`; }).join(' AND ');
@@ -268,7 +272,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
       return { success: true };
     } catch (error) {
       await this._runSessionQuery(bigquery, baseOptions, 'ROLLBACK TRANSACTION').catch(() => undefined);
-      return { success: false, error: error?.message || String(error) };
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
   }
 
@@ -314,7 +318,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
 
     if (this._paginationCache.size >= 100 && !this._paginationCache.has(key)) {
       const firstKey = this._paginationCache.keys().next().value;
-      this._paginationCache.delete(firstKey);
+      if (firstKey !== undefined) this._paginationCache.delete(firstKey);
     }
     this._paginationCache.set(key, { total, exact, resultId });
     return { total, exact, resultId };
@@ -356,8 +360,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
   }
 
   public query: (typeof AbstractDriver)['prototype']['query'] = async (query, opt: any = {}) => {
-    await this.open();
-    const bigquery = await this.connection;
+    const bigquery = await this.open();
     const rawSql = String(query);
     const baseOptions: any = {
       location: this.credentials.location,
@@ -405,7 +408,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
         });
       }
     } else {
-      const cols = standardizedRows && standardizedRows.length && Object.keys(standardizedRows[0]);
+      const cols = standardizedRows && standardizedRows.length ? Object.keys(standardizedRows[0]) : [];
       const editability = await this.resolveResultEditability(bigquery, cols || [], rawSql, baseOptions).catch(() => ({ editable: false, nonEditableReason: 'Unable to resolve table metadata for this result.' }));
       resultsAgg.push({
         cols,
@@ -428,7 +431,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
     const results = await this.queryResults(this.queries.fetchColumns(parent));
     return results.map((col) => ({
       ...col,
-      iconName: col.isPk ? "pk" : null,
+      iconName: col.isPk ? "pk" : undefined,
       childType: ContextValue.NO_CHILD,
       table: parent,
     }));
@@ -519,11 +522,11 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
   ): Promise<NSDatabase.SearchableItem[]> {
     switch (itemType) {
       case ContextValue.TABLE:
-        return this.queryResults(this.queries.searchTables({ search }));
+        return this.queryResults(this.queries.searchTables({ search })) as Promise<NSDatabase.SearchableItem[]>;
       case ContextValue.COLUMN:
         return this.queryResults(
           this.queries.searchColumns({ search, ...extraParams })
-        );
+        ) as Promise<NSDatabase.SearchableItem[]>;
     }
     return [];
   }
