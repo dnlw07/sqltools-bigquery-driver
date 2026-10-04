@@ -102,10 +102,26 @@ const fetchViews: IBaseQueries['fetchTables'] = fetchTablesAndViews(ContextValue
 
 const searchTables: IBaseQueries['searchTables'] = queryFactory`
   SELECT table_name AS label,
-    table_type AS type
-  FROM ${p => p.table.schema}.INFORMATION_SCHEMA.TABLES
-  WHERE LOWER(table_name) LIKE '%${p => p.search?.toLowerCase()}%'
+    table_schema AS schema,
+    CASE WHEN table_type = 'VIEW' THEN '${ContextValue.VIEW}' ELSE '${ContextValue.TABLE}' END AS type,
+    table_type AS detail
+  FROM \`${(p: any) => String(p.database).replace(/`/g, '')}\`.INFORMATION_SCHEMA.TABLES
+  WHERE 1 = 1
+    ${p => p.search ? `AND LOWER(table_name) LIKE '%${p.search.toLowerCase()}%'` : ''}
   ORDER BY table_name
+  LIMIT ${p => p.limit || 100}
+`;
+
+const searchSchemas: IBaseQueries['searchTables'] = queryFactory`
+  SELECT schema_name AS label,
+    schema_name AS schema,
+    '${ContextValue.SCHEMA}' AS type,
+    'dataset' AS detail
+  FROM INFORMATION_SCHEMA.SCHEMATA
+  WHERE 1 = 1
+    ${p => p.search ? `AND LOWER(schema_name) LIKE '%${p.search.toLowerCase()}%'` : ''}
+  ORDER BY schema_name
+  LIMIT ${p => p.limit || 100}
 `;
 
 const searchColumns: IBaseQueries['searchColumns'] = queryFactory`
@@ -161,6 +177,7 @@ export default {
   fetchSchemas,
   fetchDatabases,
   searchTables,
+  searchSchemas,
   searchColumns,
   
 }

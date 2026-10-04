@@ -1,4 +1,5 @@
 import AbstractDriver from '@sqltools/base-driver';
+import { CompletionItem, CompletionItemKind } from 'vscode-languageserver';
 import {
   IConnectionDriver,
   MConnectionExplorer,
@@ -326,7 +327,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
 
   private async _execPaginatedSelect(bigquery: any, rawSql: string, baseOptions: any, opt: any): Promise<NSDatabase.IResult> {
     const page = opt.page || 0;
-    const pageSize = opt.pageSize || this.credentials.previewLimit || 50;
+    const pageSize = opt.pageSize || this.credentials.previewLimit || 100;
     const offset = page * pageSize;
     const base = this._stripTrailingSemicolon(rawSql);
     const limitedSql = `${base} LIMIT ${pageSize + 1} OFFSET ${offset}`;
@@ -517,6 +518,91 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
     return [];
   }
 
+  private async listDatasets(projectId: string, search = ''): Promise<any[]> {
+    const bigquery = await this.open();
+    const [datasets] = await bigquery.getDatasets({ projectId, maxResults: 1000 });
+    const normalizedSearch = search.toLowerCase();
+    return datasets
+      .filter((dataset: any) => String(dataset.id || '').toLowerCase().includes(normalizedSearch))
+      .map((dataset: any) => ({
+        label: dataset.id,
+        schema: dataset.id,
+        database: projectId,
+        type: ContextValue.SCHEMA,
+        detail: 'Dataset',
+      }));
+  }
+
+  private async listDatasetTables(projectId: string, datasetId: string, search = ''): Promise<any[]> {
+    const bigquery = await this.open();
+    const dataset = bigquery.dataset(datasetId, { projectId });
+    const [tables] = await dataset.getTables({ maxResults: 1000 });
+    const normalizedSearch = search.toLowerCase();
+    return tables
+      .filter((table: any) => String(table.id || '').toLowerCase().includes(normalizedSearch))
+      .map((table: any) => {
+        const isView = table.metadata?.type === 'VIEW';
+        return {
+          label: table.id,
+          schema: datasetId,
+          database: projectId,
+          type: isView ? ContextValue.VIEW : ContextValue.TABLE,
+          isView,
+          detail: isView ? 'View' : 'Table',
+        };
+      });
+  }
+
+  public async getCompletionsForRawQuery(text: string, currentOffset: number): Promise<CompletionItem[]> {
+    const beforeCursor = text.slice(0, currentOffset);
+    const match = beforeCursor.match(/\b(?:FROM|JOIN)\s+`?([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]*){0,2})$/i);
+    if (!match) return null as any;
+
+    const reference = match[1];
+    const parts = reference.split('.');
+    const trailingDot = reference.endsWith('.');
+    const identifiers = trailingDot ? parts.slice(0, -1) : parts;
+    const configuredProject = String(this.credentials.projectId || '').toLowerCase();
+    const isProjectQualifier = identifiers.length >= 3 ||
+      (identifiers.length > 0 && (identifiers[0].includes('-') || identifiers[0].toLowerCase() === configuredProject));
+
+    try {
+      let suggestions: any[];
+      if (isProjectQualifier && (identifiers.length === 1 || (identifiers.length === 2 && !trailingDot))) {
+        const projectId = identifiers[0];
+        const search = identifiers.length === 2 ? identifiers[1] : '';
+        suggestions = await this.listDatasets(projectId, search);
+        return suggestions.map(dataset => ({
+          label: dataset.label,
+          detail: `BigQuery dataset in ${projectId}`,
+          filterText: dataset.label,
+          kind: CompletionItemKind.Folder,
+        }));
+      }
+
+      if (isProjectQualifier && identifiers.length >= 2) {
+        suggestions = await this.listDatasetTables(identifiers[0], identifiers[1], identifiers[2] || '');
+      } else if (!isProjectQualifier && identifiers.length <= 2) {
+        const projectId = this.credentials.projectId || (await this.open()).projectId;
+        const datasetId = identifiers[0];
+        const search = identifiers.length === 2 ? identifiers[1] : '';
+        suggestions = datasetId ? await this.listDatasetTables(projectId, datasetId, search) : [];
+      } else {
+        return null as any;
+      }
+
+      return suggestions.map(item => ({
+        label: item.label,
+        detail: `${item.detail} in ${item.database}.${item.schema}`,
+        filterText: item.label,
+        kind: item.isView ? CompletionItemKind.Reference : CompletionItemKind.Constant,
+      }));
+    } catch (error) {
+      this.log.error(`BigQuery completion lookup failed: ${error instanceof Error ? error.message : String(error)}`);
+      return [];
+    }
+  }
+
   /**
    * This method is a helper for intellisense and quick picks.
    */
@@ -527,7 +613,13 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
   ): Promise<NSDatabase.SearchableItem[]> {
     switch (itemType) {
       case ContextValue.TABLE:
-        return this.queryResults(this.queries.searchTables({ search })) as Promise<NSDatabase.SearchableItem[]>;
+      case ContextValue.VIEW:
+        // BigQuery can only list tables per dataset, so a dataset qualifier is required
+        if (!extraParams.database) return [];
+        return this.queryResults(this.queries.searchTables({ search, database: extraParams.database })) as Promise<NSDatabase.SearchableItem[]>;
+      case ContextValue.DATABASE:
+      case ContextValue.SCHEMA:
+        return this.listDatasets(this.credentials.projectId || (await this.open()).projectId, search) as Promise<NSDatabase.SearchableItem[]>;
       case ContextValue.COLUMN:
         return this.queryResults(
           this.queries.searchColumns({ search, ...extraParams })
