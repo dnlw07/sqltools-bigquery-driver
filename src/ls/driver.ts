@@ -160,6 +160,21 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
     return undefined;
   }
 
+  private async qualifyTable(table: NSDatabase.ITable): Promise<NSDatabase.ITable> {
+    if (table.database) return table;
+    const projectId = this.credentials.projectId || (await this.open()).projectId;
+    if (!projectId) throw new Error('Unable to determine the BigQuery project for this table.');
+    return { ...table, database: projectId };
+  }
+
+  public async describeTable(table: NSDatabase.ITable, opt: any) {
+    return super.describeTable(await this.qualifyTable(table), opt);
+  }
+
+  public async showRecords(table: NSDatabase.ITable, opt: any) {
+    return super.showRecords(await this.qualifyTable(table), opt);
+  }
+
   // BigQuery's job/column metadata doesn't include the source table, so a single, unambiguous
   // FROM clause (optionally backtick-quoted, up to project.dataset.table) is required.
   private getSingleTableSource(sql: string): { schema: string; table: string } | null {
@@ -458,9 +473,13 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
     switch (item.type) {
       case ContextValue.CONNECTION:
       case ContextValue.CONNECTED_CONNECTION:
-        return this.queryResults(this.queries.fetchDatabases())
-      case ContextValue.DATABASE:
-        return (this.queryResults(this.queries.fetchSchemas(parent as NSDatabase.IDatabase)));
+          const projectId = this.credentials.projectId || (await this.open()).projectId;
+          return projectId ? [{ label: projectId, database: projectId, type: ContextValue.DATABASE, detail: 'Project' }] : [];
+        case ContextValue.DATABASE: {
+          const database = parent as NSDatabase.IDatabase;
+          const project = database.database || database.label;
+          return this.listDatasets(project);
+        }
       case ContextValue.SCHEMA:
         return <MConnectionExplorer.IChildItem[]>[
           {
@@ -550,6 +569,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
         database: projectId,
         type: ContextValue.SCHEMA,
         detail: 'Dataset',
+          iconId: 'group-by-ref-type',
       }));
   }
 
@@ -574,6 +594,24 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
           detail: isView ? 'View' : 'Table',
         };
       });
+  }
+
+  private async searchAllTables(search = ''): Promise<any[]> {
+    const projectId = this.credentials.projectId || (await this.open()).projectId;
+    if (!projectId) return [];
+    const datasets = await this.listDatasets(projectId);
+    const tablesPerDataset = await Promise.all(datasets.map(dataset =>
+      this.listDatasetTables(projectId, dataset.schema).catch(() => [])
+    ));
+    const normalizedSearch = search.toLowerCase();
+    return ([] as any[]).concat(...tablesPerDataset)
+      .filter(table => `${table.schema}.${table.label}`.toLowerCase().includes(normalizedSearch))
+      .slice(0, 500)
+      .map(table => ({
+        ...table,
+        description: table.schema,
+        detail: `${table.database}.${table.schema}.${table.label}`,
+      }));
   }
 
   public async getCompletionsForRawQuery(text: string, currentOffset: number): Promise<CompletionItem[]> {
@@ -637,8 +675,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
     switch (itemType) {
       case ContextValue.TABLE:
       case ContextValue.VIEW:
-        // BigQuery can only list tables per dataset, so a dataset qualifier is required
-        if (!extraParams.database) return [];
+        if (!extraParams.database) return this.searchAllTables(search) as Promise<NSDatabase.SearchableItem[]>;
         return this.queryResults(this.queries.searchTables({ search, database: extraParams.database })) as Promise<NSDatabase.SearchableItem[]>;
       case ContextValue.DATABASE:
       case ContextValue.SCHEMA:

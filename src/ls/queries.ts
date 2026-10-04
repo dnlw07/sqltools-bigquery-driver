@@ -1,12 +1,14 @@
 import { IBaseQueries, ContextValue} from '@sqltools/types';
 import queryFactory from '@sqltools/base-driver/dist/lib/factory';
 
+const quotePath = (...parts: string[]) => `\`${parts.map(part => String(part).replace(/`/g, '')).join('.') }\``;
+
 const describeTable: IBaseQueries['describeTable'] = queryFactory`
   SELECT 
     column_name AS name,
     data_type AS dataType,
     is_nullable AS isNullable
-  FROM ${p => p.schema}.INFORMATION_SCHEMA.COLUMNS
+  FROM ${p => quotePath(p.database, p.schema, 'INFORMATION_SCHEMA', 'COLUMNS')}
   WHERE table_name = '${p => p.label}'
   ORDER BY ordinal_position
 `;
@@ -36,7 +38,7 @@ const fetchColumns: IBaseQueries['fetchColumns'] = queryFactory`
     END as iconId,
     data_type AS detail,
     '${ContextValue.COLUMN}' as type
-  FROM ${p => p.schema}.INFORMATION_SCHEMA.COLUMNS
+  FROM ${p => quotePath(p.database, p.schema, 'INFORMATION_SCHEMA', 'COLUMNS')}
   WHERE table_name = '${p => p.table}'
   ORDER BY ordinal_position
 `;
@@ -44,7 +46,7 @@ const fetchColumns: IBaseQueries['fetchColumns'] = queryFactory`
 // NB when you pass tables the parameters are different to when you pass schemas
 const fetchRecords: IBaseQueries['fetchRecords'] = queryFactory`
   SELECT *
-  FROM \`${p => p.table.schema}.${p => p.table.label}\`
+  FROM ${p => quotePath(p.table.database, p.table.schema, p.table.label)}
   LIMIT ${p => p.limit || 50}
   OFFSET ${p => p.offset || 0}
 `;
@@ -52,7 +54,7 @@ const fetchRecords: IBaseQueries['fetchRecords'] = queryFactory`
 // NB when you pass tables the parameters are different to when you pass schemas
 const countRecords: IBaseQueries['countRecords'] = queryFactory`
   SELECT COUNT(1) AS total
-  FROM \`${p => p.table.schema}.${p => p.table.label}\`
+  FROM ${p => quotePath(p.table.database, p.table.schema, p.table.label)}
 `;
 
 const fetchTablesAndViews = (
@@ -63,8 +65,9 @@ const fetchTablesAndViews = (
     table_name AS label,
     table_name AS table,
     table_schema AS schema,
+    table_catalog AS database,
     '${type}' AS type
-  FROM ${p=>p.schema}.INFORMATION_SCHEMA.TABLES
+  FROM ${p => quotePath(p.database, p.schema, 'INFORMATION_SCHEMA', 'TABLES')}
     WHERE table_type IN ${tableType}
     ORDER BY table_name;
 `;
@@ -83,7 +86,7 @@ const fetchRoutines: IBaseQueries['fetchFunctions'] = queryFactory`
       ELSE null
     END AS iconId,
     '${ContextValue.FUNCTION}' AS type
-  FROM ${p=>p.schema}.INFORMATION_SCHEMA.ROUTINES
+  FROM ${p => quotePath(p.database, p.schema, 'INFORMATION_SCHEMA', 'ROUTINES')}
     ORDER BY routine_type, routine_name;
 `;
 
@@ -93,7 +96,7 @@ SELECT
   '${ContextValue.COLUMN}' as type,
   'NO_CHILD' as childType,
   'triangle-right' as iconId
-FROM ${p=>p.schema}.INFORMATION_SCHEMA.ROUTINES
+FROM ${p => quotePath(p.database, p.schema, 'INFORMATION_SCHEMA', 'ROUTINES')}
 WHERE routine_name = '${p => p.label}'
 `;
 
@@ -147,10 +150,12 @@ const fetchSchemas: IBaseQueries['fetchSchemas'] = queryFactory`
   SELECT
     schema_name as label,
     schema_name as schema,
+    catalog_name as database,
     '${ContextValue.SCHEMA}' as type,
     'schema' as detail,
     'group-by-ref-type' as iconId
-  FROM INFORMATION_SCHEMA.SCHEMATA
+  FROM ${p => quotePath(p.database, 'INFORMATION_SCHEMA', 'SCHEMATA')}
+  WHERE catalog_name = '${p => String(p.database).replace(/'/g, "''")}'
   ORDER BY schema_name
 `;
 
