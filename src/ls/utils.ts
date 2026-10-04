@@ -36,6 +36,21 @@ const standardizeResult = async (result: any[]): Promise<any[]> => {
 	return output;
 };
 
+const formatDuration = (milliseconds: number): string => {
+	const totalSeconds = Math.max(0, Number(milliseconds) || 0) / 1000;
+	if (totalSeconds < 60) {
+		return `${totalSeconds.toFixed(totalSeconds < 10 ? 2 : 1).replace(/\.?0+$/, '')}sec`;
+	}
+	const totalMinutes = Math.floor(totalSeconds / 60);
+	if (totalMinutes < 60) {
+		const seconds = Math.floor(totalSeconds % 60);
+		return `${totalMinutes}min${seconds ? ` ${seconds}sec` : ''}`;
+	}
+	const minutes = totalMinutes % 60;
+	return `${Math.floor(totalMinutes / 60)}h${minutes ? ` ${minutes}min` : ''}`;
+};
+
 export {
-    standardizeResult
+    standardizeResult,
+    formatDuration
 }

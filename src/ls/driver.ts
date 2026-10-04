@@ -8,7 +8,7 @@ import {
 } from "@sqltools/types";
 import { v4 as generateId } from 'uuid';
 import queries from './queries';
-import { standardizeResult }  from './utils';
+import { standardizeResult, formatDuration }  from './utils';
 
 type DriverLib = any;
 type DriverOptions = any;
@@ -276,7 +276,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
     }
   }
 
-  private _buildDmlOutcomeMessage(statementType: string, metadata: any): string {
+  private _buildDmlOutcomeMessage(statementType: string, metadata: any, duration: string): string {
     const queryStats = metadata && metadata.statistics && metadata.statistics.query;
     let affected: number | undefined;
     const dmlStats = queryStats && queryStats.dmlStats;
@@ -286,7 +286,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
       affected = Number(queryStats.numDmlAffectedRows);
     }
     const label = statementType || 'Statement';
-    return `${label} executed successfully.${affected !== undefined ? ` ${affected} rows were affected.` : ''}`;
+    return `${label} executed successfully.${affected !== undefined ? ` ${affected} row${affected === 1 ? '' : 's'} affected` : ''} (${duration}).`;
   }
 
   private async _getPaginationState(bigquery: any, baseSql: string, baseOptions: any, requestId: string, page: number, offset: number, rowsLen: number, hasMore: boolean) {
@@ -330,6 +330,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
     const offset = page * pageSize;
     const base = this._stripTrailingSemicolon(rawSql);
     const limitedSql = `${base} LIMIT ${pageSize + 1} OFFSET ${offset}`;
+    const startedAt = Date.now();
 
     const [job] = await bigquery.createQueryJob({ ...baseOptions, query: limitedSql });
     const [rows] = await job.getQueryResults();
@@ -338,9 +339,11 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
     const standardizedRows = await standardizeResult(pageRows);
 
     const { total, exact, resultId } = await this._getPaginationState(bigquery, base, baseOptions, opt.requestId, page, offset, pageRows.length, hasMore);
+    const duration = formatDuration(Date.now() - startedAt);
+    const shown = pageRows.length;
     const message = exact
-      ? `Showing page ${page + 1} of ${Math.max(1, Math.ceil(total / pageSize))} (${total} rows).`
-      : `Showing page ${page + 1} (at least ${total} rows).`;
+      ? `${shown} row${shown === 1 ? '' : 's'} shown - page ${page + 1} of ${Math.max(1, Math.ceil(total / pageSize))} (${total} total, ${pageSize}/page) in ${duration}.`
+      : `${shown} row${shown === 1 ? '' : 's'} shown - page ${page + 1} (${pageSize}/page) in ${duration}.`;
 
     return {
       cols: standardizedRows && standardizedRows.length ? Object.keys(standardizedRows[0]) : ['No rows returned'],
@@ -377,9 +380,11 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
       return resultsAgg;
     }
 
+    const startedAt = Date.now();
     const [job] = await bigquery.createQueryJob({ ...baseOptions, query: rawSql });
     const [rows] = await job.getQueryResults();
     const [metadata] = await job.getMetadata();
+    const duration = formatDuration(Date.now() - startedAt);
     const statementType = metadata?.statistics?.query?.statementType;
     const isSelectLike = !statementType || statementType === 'SELECT' || statementType === 'SCRIPT';
     const standardizedRows = await standardizeResult(rows);
@@ -389,14 +394,14 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
         resultsAgg.push({
           cols: ['No rows returned'],
           connId: this.getId(),
-          messages: [{ date: new Date(), message: `Query executed successfully but no data was returned` }],
+          messages: [{ date: new Date(), message: `Query executed successfully. 0 rows retrieved in ${duration}.` }],
           results: [],
           query: rawSql,
           requestId: opt.requestId,
           resultId: generateId(),
         });
       } else {
-        const outcome = this._buildDmlOutcomeMessage(statementType, metadata);
+        const outcome = this._buildDmlOutcomeMessage(statementType, metadata, duration);
         resultsAgg.push({
           cols: ['Statement', 'Result'],
           connId: this.getId(),
@@ -413,7 +418,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
       resultsAgg.push({
         cols,
         connId: this.getId(),
-        messages: [{ date: new Date(), message: `Query executed successfully` }],
+        messages: [{ date: new Date(), message: `${rows.length} row${rows.length === 1 ? '' : 's'} retrieved in ${duration}.` }],
         ...editability,
         results: standardizedRows,
         query: rawSql,
