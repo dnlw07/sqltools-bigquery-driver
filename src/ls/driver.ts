@@ -45,6 +45,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
   private _sessionId?: string;
   private _paginationCache?: Map<string, { total: number; exact: boolean; resultId: string }>;
   private _bigqueryConnection: Promise<any> | null = null;
+  private completionMetadataCache = new Map<string, Promise<any[]>>();
 
   public async open() {
     if (this._bigqueryConnection) return this._bigqueryConnection;
@@ -116,6 +117,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
 
 
   public async close() {
+    this.completionMetadataCache.clear();
     if (!this._bigqueryConnection) return Promise.resolve();
 
     this._bigqueryConnection = null;
@@ -518,9 +520,27 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
     return [];
   }
 
+  private cacheCompletionMetadata(key: string, load: () => Promise<any[]>): Promise<any[]> {
+    const cached = this.completionMetadataCache.get(key);
+    if (cached) return cached;
+    const pending = Promise.resolve().then(load).catch(error => {
+      if (this.completionMetadataCache.get(key) === pending) this.completionMetadataCache.delete(key);
+      throw error;
+    });
+    if (this.completionMetadataCache.size >= 256) {
+      const firstKey = this.completionMetadataCache.keys().next().value;
+      if (firstKey !== undefined) this.completionMetadataCache.delete(firstKey);
+    }
+    this.completionMetadataCache.set(key, pending);
+    return pending;
+  }
+
   private async listDatasets(projectId: string, search = ''): Promise<any[]> {
-    const bigquery = await this.open();
-    const [datasets] = await bigquery.getDatasets({ projectId, maxResults: 1000 });
+    const datasets = await this.cacheCompletionMetadata(JSON.stringify(['datasets', projectId]), async () => {
+      const bigquery = await this.open();
+      const [datasets] = await bigquery.getDatasets({ projectId, maxResults: 1000 });
+      return datasets;
+    });
     const normalizedSearch = search.toLowerCase();
     return datasets
       .filter((dataset: any) => String(dataset.id || '').toLowerCase().includes(normalizedSearch))
@@ -534,9 +554,12 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
   }
 
   private async listDatasetTables(projectId: string, datasetId: string, search = ''): Promise<any[]> {
-    const bigquery = await this.open();
-    const dataset = bigquery.dataset(datasetId, { projectId });
-    const [tables] = await dataset.getTables({ maxResults: 1000 });
+    const tables = await this.cacheCompletionMetadata(JSON.stringify(['tables', projectId, datasetId]), async () => {
+      const bigquery = await this.open();
+      const dataset = bigquery.dataset(datasetId, { projectId });
+      const [tables] = await dataset.getTables({ maxResults: 1000 });
+      return tables;
+    });
     const normalizedSearch = search.toLowerCase();
     return tables
       .filter((table: any) => String(table.id || '').toLowerCase().includes(normalizedSearch))
