@@ -263,34 +263,56 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
     const quoteIdentifier = (identifier: string) => `\`${identifier.replace(/`/g, '')}\``;
     const bigquery = await this.open();
     const baseOptions: any = { location: this.credentials.location };
+    let failedIndex = 0;
+    let transactionStarted = false;
     try {
-      await this._ensureSession(bigquery, baseOptions);
-      baseOptions.connectionProperties = this._buildConnectionProperties();
-      await this._runSessionQuery(bigquery, baseOptions, 'BEGIN TRANSACTION');
-      for (let index = 0; index < edits.length; index++) {
-        const { table, primaryKey, changes } = edits[index];
-        const changeColumns = Object.keys(changes);
-        const primaryKeyColumns = Object.keys(primaryKey);
-        if (!table?.label || !changeColumns.length || !primaryKeyColumns.length) throw new Error('Invalid edit request.');
+      const prepared = edits.map(({ table, primaryKey, changes }, index) => {
+        failedIndex = index;
+        const changeColumns = Object.keys(changes || {});
+        const primaryKeyColumns = Object.keys(primaryKey || {});
+        if (!table?.label || !changeColumns.length || !primaryKeyColumns.length ||
+          primaryKeyColumns.some(column => primaryKey[column] === undefined) ||
+          changeColumns.some(column => changes[column] === undefined)) throw new Error('Invalid edit request.');
         const relation = [table.schema, table.label]
           .filter((identifier): identifier is string => typeof identifier === 'string' && identifier.length > 0)
           .map(quoteIdentifier)
           .join('.');
         const params: any = {};
+        const matchParams: any = {};
         const setClause = changeColumns.map((column, i) => { const key = `s${i}`; params[key] = changes[column]; return `${quoteIdentifier(column)} = @${key}`; }).join(', ');
-        const whereClause = primaryKeyColumns.map((column, i) => { const key = `w${i}`; params[key] = primaryKey[column]; return `${quoteIdentifier(column)} = @${key}`; }).join(' AND ');
+        const whereClause = primaryKeyColumns.map((column, i) => {
+          if (primaryKey[column] === null) return `${quoteIdentifier(column)} IS NULL`;
+          const key = `w${i}`;
+          matchParams[key] = primaryKey[column];
+          return `${quoteIdentifier(column)} = @${key}`;
+        }).join(' AND ');
+        return { relation, setClause, whereClause, matchParams, params: { ...params, ...matchParams } };
+      });
+      await this._ensureSession(bigquery, baseOptions);
+      baseOptions.connectionProperties = this._buildConnectionProperties();
+      await this._runSessionQuery(bigquery, baseOptions, 'BEGIN TRANSACTION');
+      transactionStarted = true;
+      for (let index = 0; index < prepared.length; index++) {
+        failedIndex = index;
+        const { relation, whereClause, matchParams } = prepared[index];
+        const { rows } = await this._runSessionQuery(bigquery, baseOptions, `SELECT COUNT(*) AS matching_count FROM ${relation} WHERE ${whereClause}`, matchParams);
+        const count = Number(rows?.[0]?.matching_count);
+        if (count !== 1) throw new Error(`Unsafe update for ${relation}: WHERE matches ${Number.isFinite(count) ? count : 'an unknown number of'} rows; expected exactly 1. No changes saved.`);
+      }
+      for (let index = 0; index < prepared.length; index++) {
+        failedIndex = index;
+        const { relation, setClause, whereClause, params } = prepared[index];
         const { metadata } = await this._runSessionQuery(bigquery, baseOptions, `UPDATE ${relation} SET ${setClause} WHERE ${whereClause}`, params);
         const affected = Number(metadata?.statistics?.query?.dmlStats?.updatedRowCount ?? metadata?.statistics?.query?.numDmlAffectedRows ?? 0);
         if (affected !== 1) {
-          await this._runSessionQuery(bigquery, baseOptions, 'ROLLBACK TRANSACTION').catch(() => undefined);
-          return { success: false, failedIndex: index, error: 'Row was modified or deleted since it was loaded.' };
+          throw new Error('Row matching changed after validation. No changes saved.');
         }
       }
       await this._runSessionQuery(bigquery, baseOptions, 'COMMIT TRANSACTION');
       return { success: true };
     } catch (error) {
-      await this._runSessionQuery(bigquery, baseOptions, 'ROLLBACK TRANSACTION').catch(() => undefined);
-      return { success: false, error: error instanceof Error ? error.message : String(error) };
+      if (transactionStarted) await this._runSessionQuery(bigquery, baseOptions, 'ROLLBACK TRANSACTION').catch(() => undefined);
+      return { success: false, failedIndex, error: error instanceof Error ? error.message : String(error) };
     }
   }
 
