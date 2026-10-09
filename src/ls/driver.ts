@@ -389,10 +389,12 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
     const startedAt = Date.now();
 
     const [job] = await bigquery.createQueryJob({ ...baseOptions, query: limitedSql });
-    const [rows] = await job.getQueryResults();
+    const [rows, , response] = await job.getQueryResults();
     const hasMore = rows.length > pageSize;
     const pageRows = hasMore ? rows.slice(0, pageSize) : rows;
     const standardizedRows = await standardizeResult(pageRows);
+    const cols = standardizedRows.length ? Object.keys(standardizedRows[0])
+      : (response?.schema?.fields || []).map((field: { name: string }) => field.name);
 
     const { total, exact, resultId } = await this._getPaginationState(bigquery, base, baseOptions, opt.requestId, page, offset, pageRows.length, hasMore);
     const duration = formatDuration(Date.now() - startedAt);
@@ -402,10 +404,10 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
       : `${shown} row${shown === 1 ? '' : 's'} shown - page ${page + 1} (${pageSize}/page) in ${duration}.`;
 
     return {
-      cols: standardizedRows && standardizedRows.length ? Object.keys(standardizedRows[0]) : ['No rows returned'],
+      cols,
       connId: this.getId(),
       messages: [{ date: new Date(), message }],
-      ...(await this.resolveResultEditability(bigquery, standardizedRows && standardizedRows.length ? Object.keys(standardizedRows[0]) : [], base, baseOptions).catch(() => ({ editable: false, nonEditableReason: 'Unable to resolve table metadata for this result.' }))),
+      ...(await this.resolveResultEditability(bigquery, cols, base, baseOptions).catch(() => ({ editable: false, nonEditableReason: 'Unable to resolve table metadata for this result.' }))),
       results: standardizedRows,
       query: rawSql,
       requestId: opt.requestId,
@@ -438,17 +440,19 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
 
     const startedAt = Date.now();
     const [job] = await bigquery.createQueryJob({ ...baseOptions, query: rawSql });
-    const [rows] = await job.getQueryResults();
+    const [rows, , response] = await job.getQueryResults();
     const [metadata] = await job.getMetadata();
     const duration = formatDuration(Date.now() - startedAt);
     const statementType = metadata?.statistics?.query?.statementType;
     const isSelectLike = !statementType || statementType === 'SELECT' || statementType === 'SCRIPT';
     const standardizedRows = await standardizeResult(rows);
+    const cols = standardizedRows.length ? Object.keys(standardizedRows[0])
+      : (response?.schema?.fields || []).map((field: { name: string }) => field.name);
 
     if (!Array.isArray(rows) || !rows.length) {
       if (isSelectLike) {
         resultsAgg.push({
-          cols: ['No rows returned'],
+          cols,
           connId: this.getId(),
           messages: [{ date: new Date(), message: `Query executed successfully. 0 rows retrieved in ${duration}.` }],
           results: [],
@@ -469,7 +473,6 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
         });
       }
     } else {
-      const cols = standardizedRows && standardizedRows.length ? Object.keys(standardizedRows[0]) : [];
       const editability = await this.resolveResultEditability(bigquery, cols || [], rawSql, baseOptions).catch(() => ({ editable: false, nonEditableReason: 'Unable to resolve table metadata for this result.' }));
       resultsAgg.push({
         cols,

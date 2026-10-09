@@ -1,5 +1,8 @@
 # Changelog
 
+## Unreleased
+- Preserve actual column names from query-result schema metadata for empty SELECT results, including paginated queries. Keep an empty row set instead of adding a synthetic "No rows returned" column; DML/DDL outcome grids remain unchanged.
+
 ## 0.0.12 - 2026-10-09
 - Replace per-dataset cache eviction with a compact project catalog, eight-request background loading, per-connection persisted snapshots, 15-minute background refresh, and a **Refresh Autocomplete Catalog** command. Cap rendered completions at 500 while preserving incomplete/loading state and full-catalog prefix filtering.
 - Match dataset and table completion names case-insensitively with gaps (for example, `custhist` matches `customer_order_history`), rather than requiring a continuous substring. Dataset-first ordering and selected-dataset scope are unchanged.
