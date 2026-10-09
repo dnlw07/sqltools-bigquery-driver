@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.0.12 - 2026-10-09
 - Replace per-dataset cache eviction with a compact project catalog, eight-request background loading, per-connection persisted snapshots, 15-minute background refresh, and a **Refresh Autocomplete Catalog** command. Cap rendered completions at 500 while preserving incomplete/loading state and full-catalog prefix filtering.
 - Match dataset and table completion names case-insensitively with gaps (for example, `custhist` matches `customer_order_history`), rather than requiring a continuous substring. Dataset-first ordering and selected-dataset scope are unchanged.
 - Load all dataset and table metadata pages before filtering, and return dataset-first completions consistently for empty, typed, and backtick-prefixed `FROM`/`JOIN` references. Matches on later pages remain available as the prefix narrows.
