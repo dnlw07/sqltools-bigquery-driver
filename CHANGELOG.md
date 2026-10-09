@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+- Match dataset and table completion names case-insensitively with gaps (for example, `custhist` matches `customer_order_history`), rather than requiring a continuous substring. Dataset-first ordering and selected-dataset scope are unchanged.
+- Load all dataset and table metadata pages before filtering, and return dataset-first completions consistently for empty, typed, and backtick-prefixed `FROM`/`JOIN` references. Matches on later pages remain available as the prefix narrows.
+- Fix project expansion using the selected project ID instead of the parent connection name. Resolve service-account project IDs through the client.
+- Restore dataset suggestions for unqualified table-name prefixes and use dataset-scoped API lookups after selecting a dataset.
+- Add a details panel to dataset and table completions showing object type, dataset, and project. Recognize views, materialized views, external tables, snapshots, and clones when supplied by BigQuery metadata.
+- Include view flags and project metadata in fallback table lookups so SQLTools displays views correctly.
+
 ## 0.0.10
 - Added `disablePagination` connection setting to turn off the new query-pagination behavior entirely and go back to fetching the full result set in one call
 - Added `disablePaginationCount` connection setting to skip the exact `COUNT(1)` query and always show an estimated total instead

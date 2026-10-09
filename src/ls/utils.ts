@@ -50,7 +50,20 @@ const formatDuration = (milliseconds: number): string => {
 	return `${Math.floor(totalMinutes / 60)}h${minutes ? ` ${minutes}min` : ''}`;
 };
 
+const matchesCompletionName = (name: string, search: string): boolean => {
+	const normalizedName = name.toLowerCase();
+	const normalizedSearch = search.toLowerCase();
+	let position = 0;
+	for (const character of normalizedSearch) {
+		position = normalizedName.indexOf(character, position);
+		if (position === -1) return false;
+		position++;
+	}
+	return true;
+};
+
 export {
     standardizeResult,
-    formatDuration
+    formatDuration,
+    matchesCompletionName
 }

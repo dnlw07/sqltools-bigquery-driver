@@ -106,7 +106,9 @@ const fetchViews: IBaseQueries['fetchTables'] = fetchTablesAndViews(ContextValue
 const searchTables: IBaseQueries['searchTables'] = queryFactory`
   SELECT table_name AS label,
     table_schema AS schema,
-    CASE WHEN table_type = 'VIEW' THEN '${ContextValue.VIEW}' ELSE '${ContextValue.TABLE}' END AS type,
+    table_catalog AS database,
+    table_type IN ('VIEW', 'MATERIALIZED VIEW') AS isView,
+    CASE WHEN table_type IN ('VIEW', 'MATERIALIZED VIEW') THEN '${ContextValue.VIEW}' ELSE '${ContextValue.TABLE}' END AS type,
     table_type AS detail
   FROM \`${(p: any) => String(p.database).replace(/`/g, '')}\`.INFORMATION_SCHEMA.TABLES
   WHERE 1 = 1

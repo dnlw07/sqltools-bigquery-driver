@@ -9,7 +9,7 @@ import {
 } from "@sqltools/types";
 import { v4 as generateId } from 'uuid';
 import queries from './queries';
-import { standardizeResult, formatDuration }  from './utils';
+import { standardizeResult, formatDuration, matchesCompletionName }  from './utils';
 
 type DriverLib = any;
 type DriverOptions = any;
@@ -46,6 +46,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
   private _paginationCache?: Map<string, { total: number; exact: boolean; resultId: string }>;
   private _bigqueryConnection: Promise<any> | null = null;
   private completionMetadataCache = new Map<string, Promise<any[]>>();
+  private datasetMetadataCache = new Map<string, Promise<any[]>>();
 
   public async open() {
     if (this._bigqueryConnection) return this._bigqueryConnection;
@@ -118,6 +119,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
 
   public async close() {
     this.completionMetadataCache.clear();
+    this.datasetMetadataCache.clear();
     if (!this._bigqueryConnection) return Promise.resolve();
 
     this._bigqueryConnection = null;
@@ -494,14 +496,15 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
   }: Arg0<IConnectionDriver["getChildrenForItem"]>) {
     switch (item.type) {
       case ContextValue.CONNECTION:
-      case ContextValue.CONNECTED_CONNECTION:
-          const projectId = this.credentials.projectId || (await this.open()).projectId;
-          return projectId ? [{ label: projectId, database: projectId, type: ContextValue.DATABASE, detail: 'Project' }] : [];
-        case ContextValue.DATABASE: {
-          const database = parent as NSDatabase.IDatabase;
-          const project = database.database || database.label;
-          return this.listDatasets(project);
-        }
+      case ContextValue.CONNECTED_CONNECTION: {
+        const projectId = await this.getProjectId();
+        return [{ label: projectId, database: projectId, type: ContextValue.DATABASE, detail: 'Project' }];
+      }
+      case ContextValue.DATABASE: {
+        const database = item as NSDatabase.IDatabase;
+        const project = database.database || database.label;
+        return this.listDatasets(project);
+      }
       case ContextValue.SCHEMA:
         return <MConnectionExplorer.IChildItem[]>[
           {
@@ -561,30 +564,59 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
     return [];
   }
 
-  private cacheCompletionMetadata(key: string, load: () => Promise<any[]>): Promise<any[]> {
-    const cached = this.completionMetadataCache.get(key);
+  private cacheCompletionMetadata(
+    key: string, load: () => Promise<any[]>, cache = this.completionMetadataCache
+  ): Promise<any[]> {
+    const cached = cache.get(key);
     if (cached) return cached;
     const pending = Promise.resolve().then(load).catch(error => {
-      if (this.completionMetadataCache.get(key) === pending) this.completionMetadataCache.delete(key);
+      if (cache.get(key) === pending) cache.delete(key);
       throw error;
     });
-    if (this.completionMetadataCache.size >= 256) {
-      const firstKey = this.completionMetadataCache.keys().next().value;
-      if (firstKey !== undefined) this.completionMetadataCache.delete(firstKey);
+    if (cache.size >= 256) {
+      const firstKey = cache.keys().next().value;
+      if (firstKey !== undefined) cache.delete(firstKey);
     }
-    this.completionMetadataCache.set(key, pending);
+    cache.set(key, pending);
     return pending;
+  }
+
+  private async getProjectId(): Promise<string> {
+    if (this.credentials.projectId) return this.credentials.projectId;
+    const bigquery = await this.open();
+    const projectId = typeof bigquery.getProjectId === 'function'
+      ? await bigquery.getProjectId() : bigquery.projectId;
+    if (!projectId) throw new Error('Unable to resolve the BigQuery project ID. Configure Project ID for this connection.');
+    return projectId;
+  }
+
+  private async loadCompletionPages(
+    load: (options: { autoPaginate: false; maxResults: number; pageToken?: string }) =>
+      Promise<[any[], { pageToken?: string }?]>
+  ): Promise<any[]> {
+    const items: any[] = [];
+    const visited = new Set<string>();
+    let pageToken: string | undefined;
+    do {
+      const [page, nextQuery] = await load({ autoPaginate: false, maxResults: 1000, pageToken });
+      items.push(...page);
+      pageToken = nextQuery?.pageToken;
+      if (pageToken) {
+        if (visited.has(pageToken)) throw new Error('BigQuery metadata pagination returned a repeated page token.');
+        visited.add(pageToken);
+      }
+    } while (pageToken);
+    return items;
   }
 
   private async listDatasets(projectId: string, search = ''): Promise<any[]> {
     const datasets = await this.cacheCompletionMetadata(JSON.stringify(['datasets', projectId]), async () => {
       const bigquery = await this.open();
-      const [datasets] = await bigquery.getDatasets({ projectId, maxResults: 1000 });
-      return datasets;
-    });
-    const normalizedSearch = search.toLowerCase();
+      return this.loadCompletionPages(options => bigquery.getDatasets({ ...options, projectId }));
+    }, this.datasetMetadataCache);
     return datasets
-      .filter((dataset: any) => String(dataset.id || '').toLowerCase().includes(normalizedSearch))
+      .filter((dataset: any) => matchesCompletionName(String(dataset.id || ''), search))
+      .sort((left, right) => String(left.id).localeCompare(String(right.id)))
       .map((dataset: any) => ({
         label: dataset.id,
         schema: dataset.id,
@@ -599,74 +631,104 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
     const tables = await this.cacheCompletionMetadata(JSON.stringify(['tables', projectId, datasetId]), async () => {
       const bigquery = await this.open();
       const dataset = bigquery.dataset(datasetId, { projectId });
-      const [tables] = await dataset.getTables({ maxResults: 1000 });
-      return tables;
+      return this.loadCompletionPages(options => dataset.getTables(options));
     });
-    const normalizedSearch = search.toLowerCase();
     return tables
-      .filter((table: any) => String(table.id || '').toLowerCase().includes(normalizedSearch))
+      .filter((table: any) => matchesCompletionName(String(table.id || ''), search))
+      .sort((left, right) => String(left.id).localeCompare(String(right.id)))
       .map((table: any) => {
-        const isView = table.metadata?.type === 'VIEW';
+        const metadata = table.metadata || {};
+        const objectType = metadata.type === 'VIEW' ? 'View'
+          : metadata.type === 'MATERIALIZED_VIEW' ? 'Materialized View'
+          : metadata.type === 'EXTERNAL' || metadata.externalDataConfiguration ? 'External Table'
+          : metadata.type === 'SNAPSHOT' || metadata.snapshotDefinition ? 'Snapshot'
+          : metadata.type === 'CLONE' || metadata.cloneDefinition ? 'Clone'
+          : 'Table';
+        const isView = objectType === 'View' || objectType === 'Materialized View';
         return {
           label: table.id,
           schema: datasetId,
           database: projectId,
           type: isView ? ContextValue.VIEW : ContextValue.TABLE,
           isView,
-          detail: isView ? 'View' : 'Table',
+          detail: objectType,
         };
       });
   }
 
   private async searchAllTables(search = ''): Promise<any[]> {
-    const projectId = this.credentials.projectId || (await this.open()).projectId;
-    if (!projectId) return [];
+    const projectId = await this.getProjectId();
     const datasets = await this.listDatasets(projectId);
     const tablesPerDataset = await Promise.all(datasets.map(dataset =>
-      this.listDatasetTables(projectId, dataset.schema).catch(() => [])
+      this.listDatasetTables(projectId, dataset.schema).catch(error => {
+        this.log.error(`BigQuery table completion lookup failed for ${projectId}.${dataset.schema}: ${error instanceof Error ? error.message : String(error)}`);
+        return [];
+      })
     ));
-    const normalizedSearch = search.toLowerCase();
     return ([] as any[]).concat(...tablesPerDataset)
-      .filter(table => `${table.schema}.${table.label}`.toLowerCase().includes(normalizedSearch))
-      .slice(0, 500)
+      .filter(table => matchesCompletionName(`${table.schema}.${table.label}`, search))
       .map(table => ({
         ...table,
         description: table.schema,
-        detail: `${table.database}.${table.schema}.${table.label}`,
       }));
   }
 
   public async getCompletionsForRawQuery(text: string, currentOffset: number): Promise<CompletionItem[]> {
     const beforeCursor = text.slice(0, currentOffset);
-    const match = beforeCursor.match(/\b(?:FROM|JOIN)\s+`?([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]*){0,2})$/i);
+    const match = beforeCursor.match(/\b(?:FROM|JOIN)\s+`?([A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]*){0,2})$/i);
     if (!match) return null as any;
 
     const reference = match[1];
     const parts = reference.split('.');
     const trailingDot = reference.endsWith('.');
     const identifiers = trailingDot ? parts.slice(0, -1) : parts;
-    const configuredProject = String(this.credentials.projectId || '').toLowerCase();
-    const isProjectQualifier = identifiers.length >= 3 ||
-      (identifiers.length > 0 && (identifiers[0].includes('-') || identifiers[0].toLowerCase() === configuredProject));
-
     try {
+      const resolvedProject = await this.getProjectId();
+      const configuredProject = resolvedProject.toLowerCase();
+      const isProjectQualifier = identifiers.length >= 3 ||
+        (identifiers.length > 0 && (identifiers[0].includes('-') || identifiers[0].toLowerCase() === configuredProject));
+      const datasetCompletion = (dataset: any, appendDot: boolean): CompletionItem => ({
+        label: dataset.label + (appendDot ? '.' : ''),
+        detail: 'Dataset',
+        filterText: dataset.label,
+        sortText: `0:${dataset.label}`,
+        kind: CompletionItemKind.Folder,
+        documentation: {
+          kind: 'markdown',
+          value: `\`\`\`yaml\nDataset: ${dataset.label}\nProject: ${dataset.database}\n\`\`\``,
+        },
+      });
+      const tableCompletion = (item: any): CompletionItem => ({
+        label: item.label,
+        detail: `${item.detail} in ${item.database}.${item.schema}`,
+        filterText: item.description ? `${item.schema}.${item.label}` : item.label,
+        sortText: `1:${item.schema}.${item.label}`,
+        kind: item.isView ? CompletionItemKind.Reference : CompletionItemKind.Constant,
+        documentation: {
+          kind: 'markdown',
+          value: `\`\`\`yaml\n${item.detail}: ${item.label}\nDataset: ${item.schema}\nProject: ${item.database}\n\`\`\``,
+        },
+      });
+      if (!isProjectQualifier && identifiers.length === 1 && !trailingDot) {
+        const search = identifiers[0];
+        const [datasets, tables] = await Promise.all([
+          this.listDatasets(resolvedProject, search),
+          this.searchAllTables(search),
+        ]);
+        return datasets.map(dataset => datasetCompletion(dataset, true)).concat(tables.map(tableCompletion));
+      }
       let suggestions: any[];
       if (isProjectQualifier && (identifiers.length === 1 || (identifiers.length === 2 && !trailingDot))) {
         const projectId = identifiers[0];
         const search = identifiers.length === 2 ? identifiers[1] : '';
         suggestions = await this.listDatasets(projectId, search);
-        return suggestions.map(dataset => ({
-          label: dataset.label,
-          detail: `BigQuery dataset in ${projectId}`,
-          filterText: dataset.label,
-          kind: CompletionItemKind.Folder,
-        }));
+        return suggestions.map(dataset => datasetCompletion(dataset, false));
       }
 
       if (isProjectQualifier && identifiers.length >= 2) {
         suggestions = await this.listDatasetTables(identifiers[0], identifiers[1], identifiers[2] || '');
       } else if (!isProjectQualifier && identifiers.length <= 2) {
-        const projectId = this.credentials.projectId || (await this.open()).projectId;
+        const projectId = resolvedProject;
         const datasetId = identifiers[0];
         const search = identifiers.length === 2 ? identifiers[1] : '';
         suggestions = datasetId ? await this.listDatasetTables(projectId, datasetId, search) : [];
@@ -674,12 +736,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
         return null as any;
       }
 
-      return suggestions.map(item => ({
-        label: item.label,
-        detail: `${item.detail} in ${item.database}.${item.schema}`,
-        filterText: item.label,
-        kind: item.isView ? CompletionItemKind.Reference : CompletionItemKind.Constant,
-      }));
+      return suggestions.map(tableCompletion);
     } catch (error) {
       this.log.error(`BigQuery completion lookup failed: ${error instanceof Error ? error.message : String(error)}`);
       return [];
@@ -698,10 +755,10 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
       case ContextValue.TABLE:
       case ContextValue.VIEW:
         if (!extraParams.database) return this.searchAllTables(search) as Promise<NSDatabase.SearchableItem[]>;
-        return this.queryResults(this.queries.searchTables({ search, database: extraParams.database })) as Promise<NSDatabase.SearchableItem[]>;
+        return this.listDatasetTables(await this.getProjectId(), extraParams.database, search) as Promise<NSDatabase.SearchableItem[]>;
       case ContextValue.DATABASE:
       case ContextValue.SCHEMA:
-        return this.listDatasets(this.credentials.projectId || (await this.open()).projectId, search) as Promise<NSDatabase.SearchableItem[]>;
+        return this.listDatasets(await this.getProjectId(), search) as Promise<NSDatabase.SearchableItem[]>;
       case ContextValue.COLUMN:
         return this.queryResults(
           this.queries.searchColumns({ search, ...extraParams })
@@ -716,4 +773,3 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
   }
 
 }
-

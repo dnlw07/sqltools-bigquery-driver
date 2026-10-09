@@ -21,6 +21,9 @@ This driver is maintained by [Evidence](https://evidence.dev): an open-source BI
 - View table results by selecting them in the sidebar
 - View stored procedures and functions in the sidebar
 - Completion of common keywords (e.g. SELECT, FROM, WHERE)
+- Dataset and table-name completion with object details (Table/View, Dataset, and Project). Qualified references such as `project.dataset.` show tables with a documentation panel; materialized views, external tables, snapshots, and clones are identified when available in API metadata.
+- Unqualified `FROM`/`JOIN` prefixes suggest datasets (BigQuery schemas) before tables, including inside backticks. All dataset and table metadata pages are loaded before filtering, so typing can find matches beyond the initial displayed completion limit. After selecting `dataset.`, completion lists tables from that dataset without repeating datasets. Explorer project expansion uses the project ID, not the connection's display name.
+- Dataset and table suggestions support case-insensitive, in-order abbreviated names: `custhist` matches `customer_order_history`. Characters may be skipped, but not reordered. Accepting the suggestion inserts the full name.
 
 
 ### Running a query
@@ -33,7 +36,7 @@ This driver is maintained by [Evidence](https://evidence.dev): an open-source BI
 
 ### Not Implemented
 
-- Auto Completion tables and columns with Intellisense
+- Full BigQuery SQL-aware column completion
 
 ## Connection Methods
 
@@ -46,10 +49,9 @@ For more details on the above connection methods see [connection guides](https:/
 
 ## ToDo
 - Add BigQuery-specific keywords
-- IntelliSense for table and column completion
+- Improve SQL-aware column completion
 
 ## Contributing
 Contributions are welcome. If you need help getting started, feel free to reach out on [Slack](https://slack.evidence.dev) in the #sqltools channel
 
 ### Maintained by [<img src="https://github.com/evidence-dev/sqltools-bigquery-driver/blob/master/docs/images/evidence.png?raw=true"  style="height:1em;"/>](https://www.evidence.dev)
-
