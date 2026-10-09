@@ -1,5 +1,8 @@
 import AbstractDriver from '@sqltools/base-driver';
-import { CompletionItem, CompletionItemKind } from 'vscode-languageserver';
+import { CompletionItem, CompletionItemKind, CompletionList } from 'vscode-languageserver';
+import { createHash } from 'crypto';
+import path from 'path';
+import { CompletionCatalog, CatalogItem } from './completion-catalog';
 import {
   IConnectionDriver,
   MConnectionExplorer,
@@ -45,8 +48,18 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
   private _sessionId?: string;
   private _paginationCache?: Map<string, { total: number; exact: boolean; resultId: string }>;
   private _bigqueryConnection: Promise<any> | null = null;
-  private completionMetadataCache = new Map<string, Promise<any[]>>();
-  private datasetMetadataCache = new Map<string, Promise<any[]>>();
+  static completionStoragePath?: string;
+  private static completionDrivers = new Set<BigQueryDriver>();
+  private completionCatalogs = new Map<string, CompletionCatalog>();
+
+  static async refreshCompletionCatalogs(): Promise<void> {
+    await Promise.all([...this.completionDrivers].map(driver => driver.refreshCompletionMetadata()));
+  }
+
+  public async refreshCompletionMetadata(): Promise<void> {
+    const project = await this.getProjectId();
+    await this.getCatalog(project).refresh(true);
+  }
 
   public async open() {
     if (this._bigqueryConnection) return this._bigqueryConnection;
@@ -118,8 +131,9 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
 
 
   public async close() {
-    this.completionMetadataCache.clear();
-    this.datasetMetadataCache.clear();
+    for (const catalog of this.completionCatalogs.values()) catalog.close();
+    this.completionCatalogs.clear();
+    BigQueryDriver.completionDrivers.delete(this);
     if (!this._bigqueryConnection) return Promise.resolve();
 
     this._bigqueryConnection = null;
@@ -564,23 +578,6 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
     return [];
   }
 
-  private cacheCompletionMetadata(
-    key: string, load: () => Promise<any[]>, cache = this.completionMetadataCache
-  ): Promise<any[]> {
-    const cached = cache.get(key);
-    if (cached) return cached;
-    const pending = Promise.resolve().then(load).catch(error => {
-      if (cache.get(key) === pending) cache.delete(key);
-      throw error;
-    });
-    if (cache.size >= 256) {
-      const firstKey = cache.keys().next().value;
-      if (firstKey !== undefined) cache.delete(firstKey);
-    }
-    cache.set(key, pending);
-    return pending;
-  }
-
   private async getProjectId(): Promise<string> {
     if (this.credentials.projectId) return this.credentials.projectId;
     const bigquery = await this.open();
@@ -610,31 +607,47 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
   }
 
   private async listDatasets(projectId: string, search = ''): Promise<any[]> {
-    const datasets = await this.cacheCompletionMetadata(JSON.stringify(['datasets', projectId]), async () => {
+    const catalog = this.getCatalog(projectId);
+    await catalog.initialize();
+    return catalog.datasets.filter(dataset => matchesCompletionName(dataset.label, search));
+  }
+
+  private getCatalog(projectId: string): CompletionCatalog {
+    const existing = this.completionCatalogs.get(projectId);
+    if (existing) return existing;
+    const identity = createHash('sha256').update(JSON.stringify([
+      this.getId(), projectId, this.credentials.authenticator, this.credentials.keyfile,
+      this.credentials.username, this.credentials.location,
+    ])).digest('hex');
+    const filename = BigQueryDriver.completionStoragePath
+      ? path.join(BigQueryDriver.completionStoragePath, `${identity}.json`) : undefined;
+    const catalog = new CompletionCatalog(projectId, async () => {
       const bigquery = await this.open();
-      return this.loadCompletionPages(options => bigquery.getDatasets({ ...options, projectId }));
-    }, this.datasetMetadataCache);
-    return datasets
-      .filter((dataset: any) => matchesCompletionName(String(dataset.id || ''), search))
-      .sort((left, right) => String(left.id).localeCompare(String(right.id)))
-      .map((dataset: any) => ({
+      const datasets = await this.loadCompletionPages(options => bigquery.getDatasets({ ...options, projectId }));
+      return datasets.sort((left, right) => String(left.id).localeCompare(String(right.id))).map(dataset => ({
         label: dataset.id,
         schema: dataset.id,
         database: projectId,
         type: ContextValue.SCHEMA,
         detail: 'Dataset',
-          iconId: 'group-by-ref-type',
       }));
+    }, dataset => this.loadDatasetTables(projectId, dataset), message => this.log.error(message), filename);
+    this.completionCatalogs.set(projectId, catalog);
+    BigQueryDriver.completionDrivers.add(this);
+    return catalog;
   }
 
   private async listDatasetTables(projectId: string, datasetId: string, search = ''): Promise<any[]> {
-    const tables = await this.cacheCompletionMetadata(JSON.stringify(['tables', projectId, datasetId]), async () => {
-      const bigquery = await this.open();
-      const dataset = bigquery.dataset(datasetId, { projectId });
-      return this.loadCompletionPages(options => dataset.getTables(options));
-    });
+    const catalog = this.getCatalog(projectId);
+    const tables = await catalog.datasetTables(datasetId);
+    return tables.filter(table => matchesCompletionName(table.label, search));
+  }
+
+  private async loadDatasetTables(projectId: string, datasetId: string): Promise<CatalogItem[]> {
+    const bigquery = await this.open();
+    const dataset = bigquery.dataset(datasetId, { projectId });
+    const tables = await this.loadCompletionPages(options => dataset.getTables(options));
     return tables
-      .filter((table: any) => matchesCompletionName(String(table.id || ''), search))
       .sort((left, right) => String(left.id).localeCompare(String(right.id)))
       .map((table: any) => {
         const metadata = table.metadata || {};
@@ -658,14 +671,9 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
 
   private async searchAllTables(search = ''): Promise<any[]> {
     const projectId = await this.getProjectId();
-    const datasets = await this.listDatasets(projectId);
-    const tablesPerDataset = await Promise.all(datasets.map(dataset =>
-      this.listDatasetTables(projectId, dataset.schema).catch(error => {
-        this.log.error(`BigQuery table completion lookup failed for ${projectId}.${dataset.schema}: ${error instanceof Error ? error.message : String(error)}`);
-        return [];
-      })
-    ));
-    return ([] as any[]).concat(...tablesPerDataset)
+    const catalog = this.getCatalog(projectId);
+    await catalog.ready();
+    return [...catalog.tables.values()].reduce<CatalogItem[]>((all, tables) => all.concat(tables), [])
       .filter(table => matchesCompletionName(`${table.schema}.${table.label}`, search))
       .map(table => ({
         ...table,
@@ -673,10 +681,10 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
       }));
   }
 
-  public async getCompletionsForRawQuery(text: string, currentOffset: number): Promise<CompletionItem[]> {
+  public async getCompletionsForRawQuery(text: string, currentOffset: number): Promise<CompletionList | null> {
     const beforeCursor = text.slice(0, currentOffset);
     const match = beforeCursor.match(/\b(?:FROM|JOIN)\s+`?([A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]*){0,2})$/i);
-    if (!match) return null as any;
+    if (!match) return null;
 
     const reference = match[1];
     const parts = reference.split('.');
@@ -711,18 +719,30 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
       });
       if (!isProjectQualifier && identifiers.length === 1 && !trailingDot) {
         const search = identifiers[0];
-        const [datasets, tables] = await Promise.all([
-          this.listDatasets(resolvedProject, search),
-          this.searchAllTables(search),
-        ]);
-        return datasets.map(dataset => datasetCompletion(dataset, true)).concat(tables.map(tableCompletion));
+        const catalog = this.getCatalog(resolvedProject);
+        await catalog.initialize();
+        const loading = catalog.startRefresh();
+        const items: CompletionItem[] = [];
+        let count = 0;
+        for (const dataset of catalog.datasets) {
+          if (!matchesCompletionName(dataset.label, search)) continue;
+          count++;
+          if (items.length < 500) items.push(datasetCompletion(dataset, true));
+        }
+        for (const tables of catalog.tables.values()) for (const table of tables) {
+          if (!matchesCompletionName(`${table.schema}.${table.label}`, search)) continue;
+          count++;
+          if (items.length < 500) items.push(tableCompletion({ ...table, description: table.schema }));
+        }
+        return { items, isIncomplete: loading || count > 500 };
       }
       let suggestions: any[];
       if (isProjectQualifier && (identifiers.length === 1 || (identifiers.length === 2 && !trailingDot))) {
         const projectId = identifiers[0];
         const search = identifiers.length === 2 ? identifiers[1] : '';
         suggestions = await this.listDatasets(projectId, search);
-        return suggestions.map(dataset => datasetCompletion(dataset, false));
+        return { items: suggestions.slice(0, 500).map(dataset => datasetCompletion(dataset, false)),
+          isIncomplete: suggestions.length > 500 };
       }
 
       if (isProjectQualifier && identifiers.length >= 2) {
@@ -733,13 +753,13 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
         const search = identifiers.length === 2 ? identifiers[1] : '';
         suggestions = datasetId ? await this.listDatasetTables(projectId, datasetId, search) : [];
       } else {
-        return null as any;
+        return null;
       }
 
-      return suggestions.map(tableCompletion);
+      return { items: suggestions.slice(0, 500).map(tableCompletion), isIncomplete: suggestions.length > 500 };
     } catch (error) {
       this.log.error(`BigQuery completion lookup failed: ${error instanceof Error ? error.message : String(error)}`);
-      return [];
+      return { items: [], isIncomplete: false };
     }
   }
 

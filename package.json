@@ -48,6 +48,12 @@
     "onCommand:sqltools.*"
   ],
   "contributes": {
+    "commands": [
+      {
+        "command": "sqltools.bigquery.refreshAutocomplete",
+        "title": "SQLTools BigQuery: Refresh Autocomplete Catalog"
+      }
+    ],
     "languages": [
       {
           "id": "bqsql",

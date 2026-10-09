@@ -32,6 +32,14 @@ function setup() {
   return driver;
 }
 
+async function complete(driver, sql) {
+  const initial = await driver.getCompletionsForRawQuery(sql, sql.length);
+  if (initial?.isIncomplete) {
+    for (const catalog of driver.completionCatalogs.values()) await catalog.ready();
+  }
+  return (await driver.getCompletionsForRawQuery(sql, sql.length)).items;
+}
+
 for (const sql of [
   'SELECT * FROM custhist',
   'SELECT * FROM `CUSTHIST',
@@ -39,7 +47,7 @@ for (const sql of [
   'SELECT * FROM `test-project.custhist',
 ]) {
   test(`finds abbreviated dataset names: ${sql}`, async () => {
-    const items = await setup().getCompletionsForRawQuery(sql, sql.length);
+    const items = await complete(setup(), sql);
     assert.equal(items[0].kind, CompletionItemKind.Folder);
     assert.equal(items[0].filterText, 'customer_order_history');
     assert.match(items[0].label, /^customer_order_history\.?$/);
@@ -54,7 +62,7 @@ for (const sql of [
   'SELECT * FROM hr.some_table JOIN hr.custhist',
 ]) {
   test(`finds abbreviated table names within the selected dataset: ${sql}`, async () => {
-    const items = await setup().getCompletionsForRawQuery(sql, sql.length);
+    const items = await complete(setup(), sql);
     assert.equal(items.length, 1);
     assert.equal(items[0].label, 'customer_order_history');
     assert.equal(items[0].filterText, 'customer_order_history');
@@ -75,7 +83,7 @@ test('uses the same abbreviated matching for schema and table lookup APIs', asyn
 
 test('unqualified table filter text retains dataset matches for editor-side filtering', async () => {
   const sql = 'SELECT * FROM hrcusthist';
-  const items = await setup().getCompletionsForRawQuery(sql, sql.length);
+  const items = await complete(setup(), sql);
   assert.equal(items.length, 1);
   assert.equal(items[0].label, 'customer_order_history');
   assert.equal(items[0].filterText, 'hr.customer_order_history');
@@ -84,5 +92,5 @@ test('unqualified table filter text retains dataset matches for editor-side filt
 
 test('does not return objects whose characters are out of order', async () => {
   const sql = 'SELECT * FROM hr.histcust';
-  assert.deepEqual(await setup().getCompletionsForRawQuery(sql, sql.length), []);
+  assert.deepEqual(await complete(setup(), sql), []);
 });

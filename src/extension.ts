@@ -33,6 +33,19 @@ export async function activate(extContext: ExtensionContext): Promise<IDriverExt
         extension.resourcesMap().set(`driver/${value}/ui-schema`, extContext.asAbsolutePath('ui.schema.json'));
       });
       await extension.client.sendRequest('ls/RegisterPlugin', { path: extContext.asAbsolutePath('out/ls/plugin.js') });
+      await extension.client.sendRequest('bigquery/ConfigureCompletionStorage', {
+        path: vscode.Uri.joinPath(extContext.globalStorageUri, 'completion-catalogs').fsPath,
+      });
+      extContext.subscriptions.push(vscode.commands.registerCommand('sqltools.bigquery.refreshAutocomplete', async () => {
+        try {
+          await vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification, title: 'Refreshing BigQuery autocomplete',
+          }, () => extension.client.sendRequest('bigquery/RefreshCompletionCatalog'));
+          vscode.window.showInformationMessage('BigQuery autocomplete catalogs refreshed.');
+        } catch (error) {
+          vscode.window.showErrorMessage(`BigQuery autocomplete refresh failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }));
     },
   };
   api.registerPlugin(plugin);

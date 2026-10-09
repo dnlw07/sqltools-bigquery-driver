@@ -7,6 +7,12 @@ const YourDriverPlugin: ILanguageServerPlugin = {
     DRIVER_ALIASES.forEach(({ value }) => {
       server.getContext().drivers.set(value, YourDriver as any);
     });
+    server.onRequest('bigquery/ConfigureCompletionStorage', async (params: { path: string }) => {
+      YourDriver.completionStoragePath = params.path;
+    });
+    server.onRequest('bigquery/RefreshCompletionCatalog', async () => {
+      await YourDriver.refreshCompletionCatalogs();
+    });
   }
 }
 

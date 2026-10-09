@@ -25,6 +25,14 @@ This driver is maintained by [Evidence](https://evidence.dev): an open-source BI
 - Unqualified `FROM`/`JOIN` prefixes suggest datasets (BigQuery schemas) before tables, including inside backticks. All dataset and table metadata pages are loaded before filtering, so typing can find matches beyond the initial displayed completion limit. After selecting `dataset.`, completion lists tables from that dataset without repeating datasets. Explorer project expansion uses the project ID, not the connection's display name.
 - Dataset and table suggestions support case-insensitive, in-order abbreviated names: `custhist` matches `customer_order_history`. Characters may be skipped, but not reordered. Accepting the suggestion inserts the full name.
 
+### Autocomplete catalog
+
+BigQuery autocomplete keeps compact metadata per connection and project. On a cold connection, datasets are available before the background table scan finishes. The scan uses at most eight concurrent table-list requests; already loaded tables remain searchable while it runs. Completion responses are marked incomplete while loading or when more than 500 objects match, so narrowing the prefix searches the full catalog again. Documentation is built only for displayed matches.
+
+Catalogs are stored in the driver's VS Code global storage directory as separate hashed connection/project files containing names and object types, not credentials or table data. Reconnecting can reuse these snapshots. Unqualified completion refreshes catalogs older than 15 minutes in the background. Failed lookups are logged and retried no sooner than one minute; available metadata is retained.
+
+Run **SQLTools BigQuery: Refresh Autocomplete Catalog** from the command palette to reload metadata for open BigQuery connections that have loaded a catalog. After `dataset.`, only that dataset is searched. This optimized loading-state protocol requires an updated SQLTools extension supporting driver completion lists.
+
 
 ### Running a query
 
