@@ -69,7 +69,10 @@ export async function activate(extContext: ExtensionContext): Promise<IDriverExt
         const connections: any[] = await vscode.commands.executeCommand('sqltools.getConnections', { connectedOnly: true }) || [];
         const aliases = DRIVER_ALIASES.map(({ value }) => value);
         const bigQueryConnections = connections.filter(c => aliases.includes(c.driver));
-        const conn = bigQueryConnections.find(c => c.isActive) || bigQueryConnections[0];
+        // Skip when the active connection belongs to another driver (e.g. Postgres).
+        const active = connections.find(c => c.isActive);
+        if (active && !aliases.includes(active.driver)) return;
+        const conn = bigQueryConnections.find(c => c.isActive) || (active ? undefined : bigQueryConnections[0]);
         if (!conn) return;
         // The toggle command overrides the per-connection "Estimate Query" setting.
         if (!(extContext.globalState.get<boolean>(estimateKey) ?? conn.estimateQuery === true)) return;

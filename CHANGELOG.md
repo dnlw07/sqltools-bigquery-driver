@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.0.34 - 2026-10-19
+
+- Do not run estimates while the active connection is not a BigQuery connection (e.g. Postgres).
+
 ## 0.0.33 - 2026-10-19
 
 - Rename the command to `SQLTools - BigQuery driver: Toggle estimate query`.
