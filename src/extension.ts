@@ -4,6 +4,19 @@ import { ExtensionContext } from 'vscode';
 import { DRIVER_ALIASES } from './constants';
 const { publisher, name, displayName } = require('../package.json');
 
+// Selected text, or the ';'-delimited statement around the cursor.
+function getStatementAtCursor(editor: vscode.TextEditor): string | undefined {
+  const { document, selection } = editor;
+  if (!selection.isEmpty) return document.getText(selection).trim() || undefined;
+  const text = document.getText();
+  const offset = document.offsetAt(selection.active);
+  const start = text.lastIndexOf(';', Math.max(offset - 1, 0)) + 1;
+  const endIndex = text.indexOf(';', offset);
+  const statement = text.slice(offset > 0 && text[offset - 1] === ';' ? offset : start, endIndex === -1 ? text.length : endIndex);
+  const withoutComments = statement.replace(/\/\*[\s\S]*?\*\//g, '').replace(/--[^\r\n]*/g, '').trim();
+  return /^(SELECT|WITH|INSERT|UPDATE|DELETE|MERGE)\b/i.test(withoutComments) ? statement.trim() : undefined;
+}
+
 export async function activate(extContext: ExtensionContext): Promise<IDriverExtensionApi> {
   const sqltools = vscode.extensions.getExtension<IExtension>('mtxr.sqltools');
   if (!sqltools) {
@@ -46,8 +59,45 @@ export async function activate(extContext: ExtensionContext): Promise<IDriverExt
           vscode.window.showErrorMessage(`BigQuery autocomplete refresh failed: ${error instanceof Error ? error.message : String(error)}`);
         }
       }));
+      const estimateKey = 'bigquery.estimateQuery';
+      let estimateTimer: NodeJS.Timeout | undefined;
+      let lastEstimated = '';
+      const estimateStatementAtCursor = async (editor: vscode.TextEditor) => {
+        const query = getStatementAtCursor(editor);
+        if (!query) return;
+        const connections: any[] = await vscode.commands.executeCommand('sqltools.getConnections', { connectedOnly: true }) || [];
+        const aliases = DRIVER_ALIASES.map(({ value }) => value);
+        const bigQueryConnections = connections.filter(c => aliases.includes(c.driver));
+        const conn = bigQueryConnections.find(c => c.isActive) || bigQueryConnections[0];
+        if (!conn) return;
+        // The toggle command overrides the per-connection "Estimate Query" setting.
+        if (!(extContext.globalState.get<boolean>(estimateKey) ?? conn.estimateQuery === true)) return;
+        const connectionId = conn.id || `${conn.name}|${conn.driver}`;
+        const key = `${connectionId}\n${query}`;
+        if (key === lastEstimated) return;
+        lastEstimated = key;
+        const message: string | undefined = await extension.client.sendRequest('bigquery/EstimateQuery', { connectionId, query });
+        if (message) {
+          vscode.window.showInformationMessage(message);
+          await vscode.commands.executeCommand('sqltools.addConsoleMessage', message);
+        }
+      };
+      extContext.subscriptions.push(vscode.window.onDidChangeTextEditorSelection(event => {
+        if (!['sql', 'bqsql'].includes(event.textEditor.document.languageId)) return;
+        if (estimateTimer) clearTimeout(estimateTimer);
+        estimateTimer = setTimeout(() => {
+          estimateStatementAtCursor(event.textEditor).catch(error => {
+            lastEstimated = '';
+            vscode.commands.executeCommand('sqltools.addConsoleMessage', `Estimate unavailable: ${error instanceof Error ? error.message : String(error)}`);
+          });
+        }, 700);
+      }));
+      extContext.subscriptions.push({ dispose: () => estimateTimer && clearTimeout(estimateTimer) });
       extContext.subscriptions.push(vscode.commands.registerCommand('sqltools.bigquery.estimateQuery', async () => {
-        await vscode.commands.executeCommand('sqltools.openSettings');
+        const enabled = !(extContext.globalState.get<boolean>(estimateKey) ?? false);
+        await extContext.globalState.update(estimateKey, enabled);
+        lastEstimated = '';
+        vscode.window.showInformationMessage(`BigQuery query estimate notifications ${enabled ? 'enabled' : 'disabled'}.`);
       }));
     },
   };

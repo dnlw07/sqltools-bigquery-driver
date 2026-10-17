@@ -50,6 +50,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
   private _bigqueryConnection: Promise<any> | null = null;
   static completionStoragePath?: string;
   private static completionDrivers = new Set<BigQueryDriver>();
+  private static openDrivers = new Set<BigQueryDriver>();
   private completionCatalogs = new Map<string, CompletionCatalog>();
 
   static async refreshCompletionCatalogs(): Promise<void> {
@@ -104,7 +105,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
       }
     });
     this._bigqueryConnection = connection;
-
+    BigQueryDriver.openDrivers.add(this);
     const initSql = this.credentials.connectionInitSql;
     if (initSql && !this._sessionId) {
       const bigquery = await connection;
@@ -134,6 +135,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
     for (const catalog of this.completionCatalogs.values()) catalog.close();
     this.completionCatalogs.clear();
     BigQueryDriver.completionDrivers.delete(this);
+    BigQueryDriver.openDrivers.delete(this);
     if (!this._bigqueryConnection) return Promise.resolve();
 
     this._bigqueryConnection = null;
@@ -185,26 +187,47 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
     return `${scaled.toFixed(precision).replace(/\.?0+$/, '')} ${unit}`;
   }
 
-  private async _estimateQueryScan(bigquery: any, query: string, baseOptions: any): Promise<string | undefined> {
-    if (this.credentials.estimateQuery !== true) return undefined;
-    try {
-      const [job] = await bigquery.createQueryJob({
-        ...baseOptions,
-        query,
-        dryRun: true,
-      });
+  // A dry-run job is never persisted, so its statistics are on the job object; fetching them
+  // from the API would 404.
+  private async _dryRunMetadata(bigquery: any, query: string, baseOptions: any): Promise<any> {
+    const run = async (options: any) => {
+      const [job] = await bigquery.createQueryJob({ ...options, query: this._stripTrailingSemicolon(query), dryRun: true });
+      if (job?.metadata?.statistics) return job.metadata;
       const [metadata] = await job.getMetadata();
+      return metadata;
+    };
+    try {
+      return await run(baseOptions);
+    } catch (error) {
+      if (!baseOptions?.connectionProperties) throw error;
+      const { connectionProperties, ...withoutSession } = baseOptions;
+      return run(withoutSession);
+    }
+  }
+
+  public async estimateSql(query: string): Promise<string> {
+    try {
+      const bigquery = await this.open();
+      const metadata = await this._dryRunMetadata(bigquery, query, { location: this.credentials.location });
       const statistics = metadata?.statistics?.query || metadata?.statistics || {};
       const processed = this._formatBytes(statistics.totalBytesProcessed);
-      if (!processed) return undefined;
+      if (!processed) return 'Estimated bytes scanned: not available for this statement.';
       const billed = this._formatBytes(statistics.totalBytesBilled);
       return billed
         ? `Estimated bytes scanned: ${processed} processed, ${billed} billed.`
         : `Estimated bytes scanned: ${processed}.`;
     } catch (error) {
-      this.log.warn(`BigQuery scan-size estimation failed; executing query normally: ${error instanceof Error ? error.message : String(error)}`);
-      return undefined;
+      const reason = error instanceof Error ? error.message : String(error);
+      this.log.warn(`BigQuery scan-size estimation failed: ${reason}`);
+      return `Estimate unavailable: ${reason}`;
     }
+  }
+
+  static async estimateFor(connectionId: string, query: string): Promise<string | undefined> {
+    const drivers = [...this.openDrivers];
+    const driver = drivers.find(d => d.getId() === connectionId) || (drivers.length === 1 ? drivers[0] : undefined);
+    if (!driver) return 'Estimate unavailable: no open BigQuery connection found.';
+    return driver.estimateSql(query);
   }
 
   private _buildConnectionProperties() {
@@ -248,8 +271,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
   // from the configured project ID; a dry run reports the project it actually referenced.
   private async resolveReferencedProjects(bigquery: any, sql: string, baseOptions: any, schema: string, table: string): Promise<string[]> {
     try {
-      const [job] = await bigquery.createQueryJob({ ...baseOptions, query: this._stripTrailingSemicolon(sql), dryRun: true });
-      const [metadata] = await job.getMetadata();
+      const metadata = await this._dryRunMetadata(bigquery, sql, baseOptions);
       const referenced: any[] = metadata?.statistics?.query?.referencedTables || [];
       const exact = referenced.filter(ref => String(ref.datasetId).toLowerCase() === schema.toLowerCase() && String(ref.tableId).toLowerCase() === table.toLowerCase());
       // A view is not listed itself, only its underlying tables, so their projects are fallbacks.
@@ -510,14 +532,11 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
     const resultsAgg: NSDatabase.IResult[] = [];
 
     if (!opt.__internal && this._isPaginatableSelect(rawSql)) {
-      const estimateMessage = await this._estimateQueryScan(bigquery, rawSql, baseOptions);
       const result = await this._execPaginatedSelect(bigquery, rawSql, baseOptions, opt);
-      if (estimateMessage) result.messages.unshift({ date: new Date(), message: estimateMessage });
       resultsAgg.push(result);
       return resultsAgg;
     }
 
-    const estimateMessage = await this._estimateQueryScan(bigquery, rawSql, baseOptions);
     const startedAt = Date.now();
     const [job] = await bigquery.createQueryJob({ ...baseOptions, query: rawSql });
     const [rows, , response] = await job.getQueryResults();
@@ -535,7 +554,6 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
           cols,
           connId: this.getId(),
           messages: [
-            ...(estimateMessage ? [{ date: new Date(), message: estimateMessage }] : []),
             { date: new Date(), message: `Query executed successfully. 0 rows retrieved in ${duration}.` },
           ],
           results: [],
@@ -549,7 +567,6 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
           cols: ['Statement', 'Result'],
           connId: this.getId(),
           messages: [
-            ...(estimateMessage ? [{ date: new Date(), message: estimateMessage }] : []),
             { date: new Date(), message: outcome },
           ],
           results: [{ Statement: rawSql, Result: outcome }],
@@ -564,7 +581,6 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
         cols,
         connId: this.getId(),
         messages: [
-          ...(estimateMessage ? [{ date: new Date(), message: estimateMessage }] : []),
           { date: new Date(), message: `${rows.length} row${rows.length === 1 ? '' : 's'} retrieved in ${duration}.` },
         ],
         ...editability,

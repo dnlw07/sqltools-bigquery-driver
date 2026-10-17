@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.0.27 - 2026-10-17
+
+- Fix caret estimate never appearing: the language server looked the connection up only after autocomplete had loaded a catalog; it now tracks every open connection. Errors are reported in the SQLTools Console, and `bqsql` files are supported.
+
+## 0.0.26 - 2026-10-17
+
+- The query estimate is shown as a notification (and in the SQLTools Console) when a statement is selected or the caret is on it, before execution. Estimation is no longer repeated when the query runs.
+
+## 0.0.25 - 2026-10-17
+
+- Pre-execution estimate at the caret now also honours the connection's Estimate Query setting, not only the toggle command.
+
+## 0.0.24 - 2026-10-17
+
+- Fix query estimation: dry-run statistics are now read from the job itself (fetching them from the API failed, so no estimate appeared). Failures are reported in the SQLTools Console.
+- With estimation enabled, placing the caret on (or selecting) a statement adds its estimate to the SQLTools Console. Requires SQLTools 0.28.50+.
+
+## 0.0.23 - 2026-10-17
+
+- Show the query estimate as a VS Code notification (previously only added to the result Messages tab).
+
+## 0.0.22 - 2026-10-17
+
+- The "Estimate query" command now toggles estimate notifications on/off (remembered across sessions, overrides the per-connection setting) instead of opening settings.
+
 ## 0.0.21 - 2026-10-17
 
 - Ignore SQL comments when locating the source table, so a commented-out FROM clause above the query no longer breaks column mapping and Copy as INSERT/UPDATE.
