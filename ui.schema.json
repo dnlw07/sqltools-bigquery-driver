@@ -9,7 +9,8 @@
     "disablePagination",
     "disablePaginationCount",
     "connectionInitSql",
-    "estimateQuery"
+    "estimateQuery",
+    "estimateNotification"
   ],
   "authenticator": {
     "ui:autofocus": true,
@@ -32,6 +33,9 @@
   },
   "estimateQuery": {
     "ui:help": "When enabled, BigQuery performs a dry-run and SQLTools shows the estimated scan size as a notification. The query is still executed normally afterward."
+  },
+  "estimateNotification": {
+    "ui:help": "Turn off to stop pop-up notifications for estimates. The estimate is still written to the SQLTools Console."
   },
   "disablePagination": {
     "ui:help": "Turn off if you prefer the old behavior (full result set, no page controls) or if pagination causes issues with certain queries."

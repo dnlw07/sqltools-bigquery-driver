@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.33 - 2026-10-19
+
+- Rename the command to `SQLTools - BigQuery driver: Toggle estimate query`.
+- Add `Estimate Notification` connection option (default on) and the `Toggle estimate notifications` command. When off, estimates are written only to the SQLTools Console.
+
 ## 0.0.32 - 2026-10-19
 
 - Fix estimates being unavailable until the first query ran, and estimates staying on the previous connection after switching: SQLTools closes the driver after its connection test, which unregistered it. Estimates now always resolve the selected connection and never use another one.

@@ -47,6 +47,12 @@
       "type": "boolean",
       "default": false
     },
+    "estimateNotification": {
+      "title": "SQLTools - BigQuery driver: Estimate Notification",
+      "description": "Show the query estimate as a notification. When off, the estimate is written to the SQLTools Console only.",
+      "type": "boolean",
+      "default": true
+    },
     "disablePagination": {
       "title": "Disable Query Pagination",
       "description": "Disable automatic LIMIT/OFFSET pagination for console SELECT/WITH queries and always fetch the full result set in one go",

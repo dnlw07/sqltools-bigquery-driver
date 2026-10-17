@@ -60,6 +60,7 @@ export async function activate(extContext: ExtensionContext): Promise<IDriverExt
         }
       }));
       const estimateKey = 'bigquery.estimateQuery';
+      const notifyKey = 'bigquery.estimateNotification';
       let estimateTimer: NodeJS.Timeout | undefined;
       let lastEstimated = '';
       const estimateStatementAtCursor = async (editor: vscode.TextEditor) => {
@@ -79,7 +80,8 @@ export async function activate(extContext: ExtensionContext): Promise<IDriverExt
         const message: string | undefined = await extension.client.sendRequest('bigquery/EstimateQuery', { connectionId, name: conn.name, query });
         if (message) {
           if (message.includes('Estimate unavailable')) lastEstimated = '';
-          vscode.window.showInformationMessage(message);
+          const notify = extContext.globalState.get<boolean>(notifyKey) ?? conn.estimateNotification !== false;
+          if (notify) vscode.window.showInformationMessage(message);
           await vscode.commands.executeCommand('sqltools.addConsoleMessage', message);
         }
       };
@@ -99,6 +101,11 @@ export async function activate(extContext: ExtensionContext): Promise<IDriverExt
         await extContext.globalState.update(estimateKey, enabled);
         lastEstimated = '';
         vscode.window.showInformationMessage(`BigQuery query estimate notifications ${enabled ? 'enabled' : 'disabled'}.`);
+      }));
+      extContext.subscriptions.push(vscode.commands.registerCommand('sqltools.bigquery.estimateNotification', async () => {
+        const enabled = !(extContext.globalState.get<boolean>(notifyKey) ?? true);
+        await extContext.globalState.update(notifyKey, enabled);
+        vscode.window.showInformationMessage(`BigQuery estimate notifications ${enabled ? 'on' : 'off (estimates go to the SQLTools Console only)'}.`);
       }));
     },
   };

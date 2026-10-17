@@ -38,7 +38,7 @@ Run **SQLTools BigQuery: Refresh Autocomplete Catalog** from the command palette
 
 ![Run Query](https://github.com/evidence-dev/sqltools-bigquery-driver/blob/master/docs/images/run-query.gif?raw=true)
 
-Use **SQLTools UI - BigQuery driver: Estimate query** from the Command Palette to open SQLTools connection settings. Enable **SQLTools - BigQuery driver: Estimate Query** for the relevant connection. The driver then performs a BigQuery dry run and reports the estimated bytes processed (and billed bytes when available) as an SQLTools notification. The dry run does not execute the query. With the option disabled (the default), no dry run is performed. If BigQuery cannot provide an estimate, the driver logs a warning and executes the query normally.
+Use **SQLTools - BigQuery driver: Toggle estimate query** from the Command Palette to turn estimates on or off, or enable **SQLTools - BigQuery driver: Estimate Query** for the relevant connection. When the caret is on a statement, the driver performs a BigQuery dry run and reports the estimated bytes processed (and billed bytes when available) before you run it. The dry run does not execute the query. Estimates are written to the SQLTools Console and, by default, shown as a notification; use **Toggle estimate notifications** or the **Estimate Notification** option to keep them in the console only. With estimates disabled (the default), no dry run is performed.
 
 ### Exploring datasets, tables and columns
 
