@@ -12,6 +12,8 @@ import {
 } from "@sqltools/types";
 import { v4 as generateId } from 'uuid';
 import queries from './queries';
+
+const PROCEDURE_TYPE = 'connection.procedure' as ContextValue;
 import { standardizeResult, formatDuration, matchesCompletionName }  from './utils';
 
 type DriverLib = any;
@@ -363,6 +365,27 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
     if (!sessionId) throw new Error('BigQuery did not return a session id.');
     this._sessionId = sessionId;
     return sessionId;
+  }
+
+  public async generateDDL(item: NSDatabase.ITable | NSDatabase.IFunction | NSDatabase.IProcedure): Promise<string> {
+    if (!item || !item.label || !item.schema) throw new Error('BigQuery DDL requires a dataset and object name.');
+    const bigquery = await this.open();
+    const project = item.database || await this.getProjectId();
+    const isRoutine = item.type === ContextValue.FUNCTION || item.type === PROCEDURE_TYPE;
+    const view = isRoutine ? 'ROUTINES' : 'TABLES';
+    const nameColumn = isRoutine ? 'routine_name' : 'table_name';
+    const [job] = await bigquery.createQueryJob({
+      location: this.credentials.location,
+      query: `SELECT ddl FROM \`${[project, item.schema, 'INFORMATION_SCHEMA', view].map(part => String(part).replace(/`/g, '')).join('.')}\` WHERE ${nameColumn} = @name`,
+      params: { name: item.label },
+    });
+    const [rows] = await job.getQueryResults();
+    const ddl = rows && rows[0] && rows[0].ddl;
+    if (typeof ddl !== 'string' || !ddl.trim()) {
+      throw new Error(`BigQuery returned no DDL for ${project}.${item.schema}.${item.label}.`);
+    }
+    const trimmed = ddl.trim();
+    return trimmed.endsWith(';') ? `${trimmed}\n` : `${trimmed};\n`;
   }
 
   private async _runSessionQuery(bigquery: any, baseOptions: any, query: string, params?: any) {
@@ -884,6 +907,24 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
       case ContextValue.VIEW:
         if (!extraParams.database) return this.searchAllTables(search) as Promise<NSDatabase.SearchableItem[]>;
         return this.listDatasetTables(await this.getProjectId(), extraParams.database, search) as Promise<NSDatabase.SearchableItem[]>;
+      case ContextValue.FUNCTION:
+      case PROCEDURE_TYPE: {
+        const projectId = await this.getProjectId();
+        const datasets = extraParams.database
+          ? [extraParams.database]
+          : (await this.listDatasets(projectId, '')).map((dataset: any) => dataset.label);
+        const lists = await Promise.all(datasets.map(async (schema: string) => {
+          try {
+            return await this.queryResults(this.queries.fetchRoutines({ database: projectId, schema } as any));
+          } catch (error) {
+            return [];
+          }
+        }));
+        return ([] as any[]).concat(...lists)
+          .map(row => ({ ...row, database: projectId, type: row.detail === 'PROCEDURE' ? PROCEDURE_TYPE : ContextValue.FUNCTION }))
+          .filter(row => (itemType === PROCEDURE_TYPE) === (row.type === PROCEDURE_TYPE))
+          .filter(row => matchesCompletionName(`${row.schema}.${row.label}`, search)) as NSDatabase.SearchableItem[];
+      }
       case ContextValue.DATABASE:
       case ContextValue.SCHEMA:
         return this.listDatasets(await this.getProjectId(), search) as Promise<NSDatabase.SearchableItem[]>;

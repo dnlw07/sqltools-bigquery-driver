@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.0.28 - 2026-10-18
+
+- Add `SQLTools: Generate DDL` support for BigQuery tables, views and procedures/functions (from `INFORMATION_SCHEMA`). Requires SQLTools 0.28.51.
+
 ## 0.0.27 - 2026-10-17
 
 - Fix caret estimate never appearing: the language server looked the connection up only after autocomplete had loaded a catalog; it now tracks every open connection. Errors are reported in the SQLTools Console, and `bqsql` files are supported.
