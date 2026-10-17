@@ -18,7 +18,7 @@ type DriverLib = any;
 type DriverOptions = any;
 
 export interface IBigQueryResultEdit {
-  table: { label: string; schema?: string };
+  table: { label: string; schema?: string; database?: string };
   primaryKey: { [column: string]: any };
   changes: { [column: string]: any };
 }
@@ -169,6 +169,44 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
     return sql.toString().replace(/;\s*$/, '');
   }
 
+  private _formatBytes(value: unknown): string | null {
+    const bytes = typeof value === 'number' ? value : Number(value);
+    if (!Number.isFinite(bytes) || bytes < 0) return null;
+    if (bytes < 1024) return `${bytes} B`;
+    const units = ['KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
+    let scaled = bytes;
+    let unit = 'B';
+    for (const nextUnit of units) {
+      scaled /= 1024;
+      unit = nextUnit;
+      if (scaled < 1024 || nextUnit === units[units.length - 1]) break;
+    }
+    const precision = scaled >= 100 ? 0 : scaled >= 10 ? 1 : 2;
+    return `${scaled.toFixed(precision).replace(/\.?0+$/, '')} ${unit}`;
+  }
+
+  private async _estimateQueryScan(bigquery: any, query: string, baseOptions: any): Promise<string | undefined> {
+    if (this.credentials.estimateQuery !== true) return undefined;
+    try {
+      const [job] = await bigquery.createQueryJob({
+        ...baseOptions,
+        query,
+        dryRun: true,
+      });
+      const [metadata] = await job.getMetadata();
+      const statistics = metadata?.statistics?.query || metadata?.statistics || {};
+      const processed = this._formatBytes(statistics.totalBytesProcessed);
+      if (!processed) return undefined;
+      const billed = this._formatBytes(statistics.totalBytesBilled);
+      return billed
+        ? `Estimated bytes scanned: ${processed} processed, ${billed} billed.`
+        : `Estimated bytes scanned: ${processed}.`;
+    } catch (error) {
+      this.log.warn(`BigQuery scan-size estimation failed; executing query normally: ${error instanceof Error ? error.message : String(error)}`);
+      return undefined;
+    }
+  }
+
   private _buildConnectionProperties() {
     if (this._sessionId) {
       return [{ key: 'session_id', value: this._sessionId }];
@@ -193,34 +231,71 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
 
   // BigQuery's job/column metadata doesn't include the source table, so a single, unambiguous
   // FROM clause (optionally backtick-quoted, up to project.dataset.table) is required.
-  private getSingleTableSource(sql: string): { schema: string; table: string } | null {
-    const normalized = sql.replace(/\s+/g, ' ');
+  private getSingleTableSource(sql: string): { database?: string; schema: string; table: string } | null {
+    const normalized = sql.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(--|#)[^\r\n]*/g, ' ').replace(/\s+/g, ' ');
     if (/\bJOIN\b|\bUNION\b|\bINTERSECT\b|\bEXCEPT\b|\bFROM\s*\(/i.test(normalized)) return null;
     const match = normalized.match(/\bFROM\s+`?([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+){1,2})`?(?:\s+(?:AS\s+)?[A-Za-z_][\w$]*)?(?:\s|;|$)/i);
     if (!match) return null;
     const parts = match[1].split('.');
-    return { schema: parts[parts.length - 2], table: parts[parts.length - 1] };
+    return {
+      database: parts.length === 3 ? parts[0] : undefined,
+      schema: parts[parts.length - 2],
+      table: parts[parts.length - 1],
+    };
+  }
+
+  // An unqualified dataset.table is resolved by BigQuery against the job's project, which may differ
+  // from the configured project ID; a dry run reports the project it actually referenced.
+  private async resolveReferencedProjects(bigquery: any, sql: string, baseOptions: any, schema: string, table: string): Promise<string[]> {
+    try {
+      const [job] = await bigquery.createQueryJob({ ...baseOptions, query: this._stripTrailingSemicolon(sql), dryRun: true });
+      const [metadata] = await job.getMetadata();
+      const referenced: any[] = metadata?.statistics?.query?.referencedTables || [];
+      const exact = referenced.filter(ref => String(ref.datasetId).toLowerCase() === schema.toLowerCase() && String(ref.tableId).toLowerCase() === table.toLowerCase());
+      // A view is not listed itself, only its underlying tables, so their projects are fallbacks.
+      return [...exact, ...referenced].map(ref => ref.projectId).filter(Boolean);
+    } catch (error) {
+      return [];
+    }
   }
 
   private async resolveResultEditability(bigquery: any, cols: string[], sql: string, baseOptions: any) {
     if (!cols.length) return { editable: false, nonEditableReason: 'Result has no columns.' };
     const singleTable = this.getSingleTableSource(sql);
     if (!singleTable) return { editable: false, nonEditableReason: 'Result does not identify one physical BigQuery table.' };
-    const { schema, table } = singleTable;
+    const { database, schema, table } = singleTable;
+    const candidates = database
+      ? [database]
+      : [...await this.resolveReferencedProjects(bigquery, sql, baseOptions, schema, table), await this.getProjectId(), bigquery.projectId]
+    const projects = candidates.filter((p, i) => p && candidates.indexOf(p) === i) as string[];
 
-    let knownColumns: Set<string>;
-    try {
-      const [job] = await bigquery.createQueryJob({ ...baseOptions, query: `SELECT column_name FROM \`${schema}\`.INFORMATION_SCHEMA.COLUMNS WHERE table_name = @table`, params: { table } });
-      const [rows] = await job.getQueryResults();
-      knownColumns = new Set(rows.map((row: any) => String(row.column_name).toUpperCase()));
-    } catch (error) {
-      return { editable: false, nonEditableReason: 'Unable to resolve table metadata for this result.' };
+    let project = projects[0];
+    let knownColumns = new Set<string>();
+    let failed = false;
+    for (const candidate of projects) {
+      try {
+        const [job] = await bigquery.createQueryJob({ ...baseOptions, query: `SELECT column_name FROM \`${candidate}.${schema}.INFORMATION_SCHEMA.COLUMNS\` WHERE table_name = @table`, params: { table } });
+        const [rows] = await job.getQueryResults();
+        const names = new Set<string>(rows.map((row: any) => String(row.column_name).toUpperCase()));
+        if (names.size) {
+          project = candidate;
+          knownColumns = names;
+          failed = false;
+          break;
+        }
+      } catch (error) {
+        failed = true;
+      }
     }
-    if (!knownColumns.size) return { editable: false, nonEditableReason: 'Result columns cannot be mapped to the source BigQuery table.' };
+    const datasetReference = `\`${project}.${schema}.INFORMATION_SCHEMA`;
+    if (!knownColumns.size) {
+      return { editable: false, nonEditableReason: failed ? 'Unable to resolve table metadata for this result.' : `Result columns cannot be mapped to the source BigQuery table (${projects.join(' | ')}.${schema}.${table}).` };
+    }
 
     const resolvedSources = cols.map((name, index) => ({ index, sourceColumn: name, table, schema }));
-    if (resolvedSources.some(source => !knownColumns.has(String(source.sourceColumn).toUpperCase()))) {
-      return { editable: false, nonEditableReason: 'Result columns cannot be mapped to the source BigQuery table.' };
+    const missing = resolvedSources.filter(source => !knownColumns.has(String(source.sourceColumn).toUpperCase()));
+    if (missing.length) {
+      return { editable: false, nonEditableReason: `Result columns cannot be mapped to the source BigQuery table (${project}.${schema}.${table}; unmatched: ${missing.map(m => m.sourceColumn).join(', ')}).` };
     }
 
     let primaryKeys: string[] = [];
@@ -228,8 +303,8 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
       const [job] = await bigquery.createQueryJob({
         ...baseOptions,
         query: `SELECT kcu.column_name AS column_name
-                FROM \`${schema}\`.INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
-                JOIN \`${schema}\`.INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
+                FROM ${datasetReference}.TABLE_CONSTRAINTS\` tc
+                JOIN ${datasetReference}.KEY_COLUMN_USAGE\` kcu
                   ON tc.constraint_name = kcu.constraint_name
                 WHERE tc.table_name = @table AND tc.constraint_type = 'PRIMARY KEY'`,
         params: { table },
@@ -247,6 +322,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
       sourceColumn: source.sourceColumn,
       table: source.table,
       schema: source.schema,
+      database: project,
       isPk: primaryKeys.includes(String(source.sourceColumn).toUpperCase()),
       editable: true,
     }));
@@ -289,7 +365,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
         if (!table?.label || !changeColumns.length || !primaryKeyColumns.length ||
           primaryKeyColumns.some(column => primaryKey[column] === undefined) ||
           changeColumns.some(column => changes[column] === undefined)) throw new Error('Invalid edit request.');
-        const relation = [table.schema, table.label]
+        const relation = [table.database, table.schema, table.label]
           .filter((identifier): identifier is string => typeof identifier === 'string' && identifier.length > 0)
           .map(quoteIdentifier)
           .join('.');
@@ -434,10 +510,14 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
     const resultsAgg: NSDatabase.IResult[] = [];
 
     if (!opt.__internal && this._isPaginatableSelect(rawSql)) {
-      resultsAgg.push(await this._execPaginatedSelect(bigquery, rawSql, baseOptions, opt));
+      const estimateMessage = await this._estimateQueryScan(bigquery, rawSql, baseOptions);
+      const result = await this._execPaginatedSelect(bigquery, rawSql, baseOptions, opt);
+      if (estimateMessage) result.messages.unshift({ date: new Date(), message: estimateMessage });
+      resultsAgg.push(result);
       return resultsAgg;
     }
 
+    const estimateMessage = await this._estimateQueryScan(bigquery, rawSql, baseOptions);
     const startedAt = Date.now();
     const [job] = await bigquery.createQueryJob({ ...baseOptions, query: rawSql });
     const [rows, , response] = await job.getQueryResults();
@@ -454,7 +534,10 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
         resultsAgg.push({
           cols,
           connId: this.getId(),
-          messages: [{ date: new Date(), message: `Query executed successfully. 0 rows retrieved in ${duration}.` }],
+          messages: [
+            ...(estimateMessage ? [{ date: new Date(), message: estimateMessage }] : []),
+            { date: new Date(), message: `Query executed successfully. 0 rows retrieved in ${duration}.` },
+          ],
           results: [],
           query: rawSql,
           requestId: opt.requestId,
@@ -465,7 +548,10 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
         resultsAgg.push({
           cols: ['Statement', 'Result'],
           connId: this.getId(),
-          messages: [{ date: new Date(), message: outcome }],
+          messages: [
+            ...(estimateMessage ? [{ date: new Date(), message: estimateMessage }] : []),
+            { date: new Date(), message: outcome },
+          ],
           results: [{ Statement: rawSql, Result: outcome }],
           query: rawSql,
           requestId: opt.requestId,
@@ -477,7 +563,10 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
       resultsAgg.push({
         cols,
         connId: this.getId(),
-        messages: [{ date: new Date(), message: `${rows.length} row${rows.length === 1 ? '' : 's'} retrieved in ${duration}.` }],
+        messages: [
+          ...(estimateMessage ? [{ date: new Date(), message: estimateMessage }] : []),
+          { date: new Date(), message: `${rows.length} row${rows.length === 1 ? '' : 's'} retrieved in ${duration}.` },
+        ],
         ...editability,
         results: standardizedRows,
         query: rawSql,

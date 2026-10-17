@@ -2,7 +2,7 @@
   "name": "sqltools-bigquery-driver",
   "displayName": "BigQuery Driver for SQLTools",
   "description": "Run Queries and Explore your BigQuery Database in VSCode",
-  "version": "0.0.12",
+  "version": "0.0.21",
   "engines": {
     "vscode": "^1.42.0"
   },
@@ -52,6 +52,10 @@
       {
         "command": "sqltools.bigquery.refreshAutocomplete",
         "title": "SQLTools BigQuery: Refresh Autocomplete Catalog"
+      },
+      {
+        "command": "sqltools.bigquery.estimateQuery",
+        "title": "SQLTools UI - BigQuery driver: Estimate query"
       }
     ],
     "languages": [

@@ -1,6 +1,40 @@
 # Changelog
 
-## Unreleased
+## 0.0.21 - 2026-10-17
+
+- Ignore SQL comments when locating the source table, so a commented-out FROM clause above the query no longer breaks column mapping and Copy as INSERT/UPDATE.
+
+## 0.0.20 - 2026-10-17
+
+- Try every candidate project (referenced tables, configured project, client project) when mapping result columns, so views and tables in other projects are editable; the unmapped message now names the resolved table and columns.
+
+## 0.0.19 - 2026-10-17
+
+- Resolve the source project of unqualified `dataset.table` queries from the query's dry-run metadata instead of assuming the configured project, fixing the "Result columns cannot be mapped to the source BigQuery table" message and the missing Copy as INSERT/UPDATE actions.
+
+## 0.0.18 - 2026-10-17
+
+- Fix `Cannot find module '@sqltools/base-driver'` when loading the plugin in 0.0.16 and 0.0.17. `@sqltools/base-driver` is again a build-time (dev) dependency so it is bundled into `out/ls/plugin.js`.
+
+## 0.0.17 - 2026-10-17
+
+- Include `@sqltools/base-driver` as a production dependency so the packaged VSIX can load the BigQuery language-server plugin.
+
+## 0.0.16 - 2026-10-17
+
+- Add the `SQLTools UI - BigQuery driver: Estimate query` command to open SQLTools connection settings, where the per-connection estimate option can be enabled.
+
+## 0.0.15 - 2026-10-17
+
+- Fix `INFORMATION_SCHEMA` metadata references used for result editability. Unqualified `dataset.table` queries now resolve columns through the configured project and expose the grid copy/edit actions.
+
+## 0.0.14 - 2026-10-17
+
+- Fix result-column mapping and grid INSERT/UPDATE support for queries using an unqualified `dataset.table` reference by resolving the configured BigQuery project.
+- Preserve explicitly qualified projects in result metadata, edits, and generated SQL.
+
+## 0.0.13 - 2026-10-17
+- Add the opt-in **SQLTools - BigQuery driver: Estimate Query** connection setting. When enabled, run a dry-run before each query and show estimated processed/billed bytes as an SQLTools notification; estimation failures log a warning and do not block execution.
 - Preserve actual column names from query-result schema metadata for empty SELECT results, including paginated queries. Keep an empty row set instead of adding a synthetic "No rows returned" column; DML/DDL outcome grids remain unchanged.
 
 ## 0.0.12 - 2026-10-09

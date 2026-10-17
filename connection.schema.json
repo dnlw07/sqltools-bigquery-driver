@@ -41,6 +41,12 @@
       "description": "SQL script executed once in a BigQuery session when the connection is opened (e.g. DECLARE/SET session variables, temp tables). Requires BigQuery session support.",
       "type": "string"
     },
+    "estimateQuery": {
+      "title": "SQLTools - BigQuery driver: Estimate Query",
+      "description": "Run a BigQuery dry-run and show the estimated processed and billed bytes as a notification before the query result.",
+      "type": "boolean",
+      "default": false
+    },
     "disablePagination": {
       "title": "Disable Query Pagination",
       "description": "Disable automatic LIMIT/OFFSET pagination for console SELECT/WITH queries and always fetch the full result set in one go",

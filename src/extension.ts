@@ -46,6 +46,9 @@ export async function activate(extContext: ExtensionContext): Promise<IDriverExt
           vscode.window.showErrorMessage(`BigQuery autocomplete refresh failed: ${error instanceof Error ? error.message : String(error)}`);
         }
       }));
+      extContext.subscriptions.push(vscode.commands.registerCommand('sqltools.bigquery.estimateQuery', async () => {
+        await vscode.commands.executeCommand('sqltools.openSettings');
+      }));
     },
   };
   api.registerPlugin(plugin);

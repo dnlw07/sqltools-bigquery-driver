@@ -8,7 +8,8 @@
     "previewLimit",
     "disablePagination",
     "disablePaginationCount",
-    "connectionInitSql"
+    "connectionInitSql",
+    "estimateQuery"
   ],
   "authenticator": {
     "ui:autofocus": true,
@@ -28,6 +29,9 @@
   "connectionInitSql": {
     "ui:widget": "textarea",
     "ui:help": "Runs once in a BigQuery session right after the connection opens. If it fails, the connection is aborted."
+  },
+  "estimateQuery": {
+    "ui:help": "When enabled, BigQuery performs a dry-run and SQLTools shows the estimated scan size as a notification. The query is still executed normally afterward."
   },
   "disablePagination": {
     "ui:help": "Turn off if you prefer the old behavior (full result set, no page controls) or if pagination causes issues with certain queries."
