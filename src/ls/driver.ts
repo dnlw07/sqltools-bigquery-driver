@@ -53,6 +53,12 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
   static completionStoragePath?: string;
   private static completionDrivers = new Set<BigQueryDriver>();
   private static openDrivers = new Set<BigQueryDriver>();
+  private static knownDrivers = new Set<BigQueryDriver>();
+
+  constructor(credentials: DriverOptions & any, getWorkspaceFolders: any) {
+    super(credentials, getWorkspaceFolders);
+    BigQueryDriver.knownDrivers.add(this);
+  }
   private completionCatalogs = new Map<string, CompletionCatalog>();
 
   static async refreshCompletionCatalogs(): Promise<void> {
@@ -134,6 +140,13 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
 
 
   public async close() {
+    BigQueryDriver.knownDrivers.delete(this);
+    return this.release();
+  }
+
+  // testConnection() releases its resources but must keep the driver registered for estimates,
+  // because SQLTools only opens the driver again when the first query runs.
+  private async release() {
     for (const catalog of this.completionCatalogs.values()) catalog.close();
     this.completionCatalogs.clear();
     BigQueryDriver.completionDrivers.delete(this);
@@ -149,7 +162,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
     try {
       const bigquery = await this.open();
       await bigquery.query('SELECT 1');
-      await this.close();
+      await this.release();
 
     } catch (error) {
       throw new Error('Failed to connect to BigQuery: ' + (error instanceof Error ? error.message : String(error)));
@@ -225,11 +238,17 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
     }
   }
 
-  static async estimateFor(connectionId: string, query: string): Promise<string | undefined> {
-    const drivers = [...this.openDrivers];
-    const driver = drivers.find(d => d.getId() === connectionId) || (drivers.length === 1 ? drivers[0] : undefined);
-    if (!driver) return 'Estimate unavailable: no open BigQuery connection found.';
-    return driver.estimateSql(query);
+  static async estimateFor(connectionId: string, query: string, name?: string): Promise<string | undefined> {
+    // Newest instances first; a driver of another connection must never be used as a fallback.
+    const drivers = [...this.knownDrivers].reverse();
+    const byId = drivers.filter(d => !!connectionId && d.getId() === connectionId);
+    const byName = drivers.filter(d => !!name && (d.credentials as any).name === name);
+    const candidates = byId.length ? byId : byName;
+    const driver = candidates.find(d => this.openDrivers.has(d)) || candidates[0];
+    if (!driver) return `Estimate unavailable: no BigQuery connection "${name || connectionId}" found.`;
+    const message = await driver.estimateSql(query);
+    const label = (driver.credentials as any).name;
+    return label ? `[${label}] ${message}` : message;
   }
 
   private _buildConnectionProperties() {

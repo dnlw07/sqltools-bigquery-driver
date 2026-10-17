@@ -76,8 +76,9 @@ export async function activate(extContext: ExtensionContext): Promise<IDriverExt
         const key = `${connectionId}\n${query}`;
         if (key === lastEstimated) return;
         lastEstimated = key;
-        const message: string | undefined = await extension.client.sendRequest('bigquery/EstimateQuery', { connectionId, query });
+        const message: string | undefined = await extension.client.sendRequest('bigquery/EstimateQuery', { connectionId, name: conn.name, query });
         if (message) {
+          if (message.includes('Estimate unavailable')) lastEstimated = '';
           vscode.window.showInformationMessage(message);
           await vscode.commands.executeCommand('sqltools.addConsoleMessage', message);
         }

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.0.32 - 2026-10-19
+
+- Fix estimates being unavailable until the first query ran, and estimates staying on the previous connection after switching: SQLTools closes the driver after its connection test, which unregistered it. Estimates now always resolve the selected connection and never use another one.
+
+## 0.0.31 - 2026-10-19
+
+- Fix estimates coming from a previously used connection/project: the estimate now matches the selected connection by id or name and never falls back to a different open connection. The estimate message is prefixed with the connection name.
+
 ## 0.0.28 - 2026-10-18
 
 - Add `SQLTools: Generate DDL` support for BigQuery tables, views and procedures/functions (from `INFORMATION_SCHEMA`). Requires SQLTools 0.28.51.
