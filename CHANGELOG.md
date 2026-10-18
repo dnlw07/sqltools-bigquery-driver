@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.0.36 - 2026-10-19
+
+- Grid editing without primary key columns skips ARRAY/STRUCT/JSON/GEOGRAPHY/RANGE columns when locating the row; the save is still rejected unless the remaining columns match exactly one row. A result with no usable column stays read-only.
+
+## 0.0.35 - 2026-10-19
+
+- Grid editing now also works when the executed `SELECT` omits primary key columns: the row is located by all returned columns (still rejected unless exactly one row matches), instead of the result being read-only.
+
 ## 0.0.34 - 2026-10-19
 
 - Do not run estimates while the active connection is not a BigQuery connection (e.g. Postgres).

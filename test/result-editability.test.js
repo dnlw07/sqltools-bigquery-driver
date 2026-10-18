@@ -73,6 +73,39 @@ test('ignores commented-out FROM clauses when locating the source table', async 
   assert.equal(result.columnMeta[0].table, 'orders');
 });
 
+test('marks ARRAY/STRUCT/JSON columns as not comparable and keeps editing without a primary key', async () => {
+  const driver = new BigQueryDriver({ id: 'result-editability', name: 'test', driver: 'BigQuery', projectId: 'p' }, async () => []);
+  const bigquery = {
+    createQueryJob: async options => [{
+      getQueryResults: async () => [/INFORMATION_SCHEMA\.COLUMNS/.test(options.query)
+        ? [
+          { column_name: 'id', data_type: 'INT64' },
+          { column_name: 'tags', data_type: 'ARRAY<STRING>' },
+          { column_name: 'payload', data_type: 'JSON' },
+        ]
+        : []],
+    }],
+  };
+  const result = await driver.resolveResultEditability(bigquery, ['id', 'tags', 'payload'], 'SELECT * FROM demo.customers;', {});
+
+  assert.equal(result.editable, true);
+  assert.deepEqual(result.columnMeta.map(column => column.comparable), [true, false, false]);
+});
+
+test('is read-only when no returned column can identify a row', async () => {
+  const driver = new BigQueryDriver({ id: 'result-editability', name: 'test', driver: 'BigQuery', projectId: 'p' }, async () => []);
+  const bigquery = {
+    createQueryJob: async options => [{
+      getQueryResults: async () => [/INFORMATION_SCHEMA\.COLUMNS/.test(options.query)
+        ? [{ column_name: 'payload', data_type: 'JSON' }]
+        : []],
+    }],
+  };
+  const result = await driver.resolveResultEditability(bigquery, ['payload'], 'SELECT payload FROM demo.customers;', {});
+
+  assert.equal(result.editable, false);
+});
+
 test('preserves an explicitly qualified project for metadata and edits', async () => {
   const { driver, queries } = createDriver();
   const result = await driver.resolveResultEditability(

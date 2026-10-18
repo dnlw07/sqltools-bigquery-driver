@@ -314,15 +314,19 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
 
     let project = projects[0];
     let knownColumns = new Set<string>();
+    const notComparable = new Set<string>();
     let failed = false;
     for (const candidate of projects) {
       try {
-        const [job] = await bigquery.createQueryJob({ ...baseOptions, query: `SELECT column_name FROM \`${candidate}.${schema}.INFORMATION_SCHEMA.COLUMNS\` WHERE table_name = @table`, params: { table } });
+        const [job] = await bigquery.createQueryJob({ ...baseOptions, query: `SELECT column_name, data_type FROM \`${candidate}.${schema}.INFORMATION_SCHEMA.COLUMNS\` WHERE table_name = @table`, params: { table } });
         const [rows] = await job.getQueryResults();
         const names = new Set<string>(rows.map((row: any) => String(row.column_name).toUpperCase()));
         if (names.size) {
           project = candidate;
           knownColumns = names;
+          notComparable.clear();
+          rows.filter((row: any) => /^(ARRAY|STRUCT|JSON|GEOGRAPHY|RANGE)\b/i.test(String(row.data_type || '')))
+            .forEach((row: any) => notComparable.add(String(row.column_name).toUpperCase()));
           failed = false;
           break;
         }
@@ -367,12 +371,17 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
       schema: source.schema,
       database: project,
       isPk: primaryKeys.includes(String(source.sourceColumn).toUpperCase()),
+      comparable: !notComparable.has(String(source.sourceColumn).toUpperCase()),
       editable: true,
     }));
-    if (primaryKeys.length && !primaryKeys.every(column => includedColumns.has(column))) {
-      return { columnMeta, editable: false, nonEditableReason: 'Result must include every primary key column.' };
+    // The projection omits part of the primary key, or there is none: every comparable returned column locates the row on save instead.
+    // The partial key is dropped so it is not mistaken for a unique identity.
+    const keyIncomplete = primaryKeys.length && !primaryKeys.every(column => includedColumns.has(column));
+    const finalMeta = keyIncomplete ? columnMeta.map(column => ({ ...column, isPk: false })) : columnMeta;
+    if (!finalMeta.some(column => column.isPk) && !finalMeta.some(column => column.comparable)) {
+      return { editable: false, nonEditableReason: 'Result has no columns that can identify a row.' };
     }
-    return { columnMeta, editable: true };
+    return { columnMeta: finalMeta, editable: true };
   }
 
   private async _ensureSession(bigquery: any, baseOptions: any) {
