@@ -956,10 +956,28 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
       case ContextValue.DATABASE:
       case ContextValue.SCHEMA:
         return this.listDatasets(await this.getProjectId(), search) as Promise<NSDatabase.SearchableItem[]>;
-      case ContextValue.COLUMN:
+      case ContextValue.COLUMN: {
+        const projectId = await this.getProjectId();
+        const requested: NSDatabase.ITable[] = extraParams.tables || [];
+        const resolved: any[] = [];
+        for (const table of requested) {
+          if (!table?.label) continue;
+          const dataset = table.schema || table.database;
+          if (dataset) {
+            // a database that differs from the dataset is an explicit project qualifier
+            const project = table.schema && table.database && table.database !== table.schema ? table.database : projectId;
+            resolved.push({ ...table, database: project, schema: dataset });
+            continue;
+          }
+          // unqualified table: find the datasets that contain it
+          const found = (await this.searchAllTables('')).filter(item => String(item.label).toLowerCase() === table.label.toLowerCase());
+          found.forEach(item => resolved.push({ ...table, label: item.label, database: item.database, schema: item.schema }));
+        }
+        if (!resolved.length) return [];
         return this.queryResults(
-          this.queries.searchColumns({ search, ...extraParams })
+          this.queries.searchColumns({ search, ...extraParams, tables: resolved })
         ) as Promise<NSDatabase.SearchableItem[]>;
+      }
     }
     return [];
   }

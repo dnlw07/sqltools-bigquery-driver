@@ -129,23 +129,24 @@ const searchSchemas: IBaseQueries['searchTables'] = queryFactory`
   LIMIT ${p => p.limit || 100}
 `;
 
+const escapeLiteral = (value: string) => String(value).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+
+// Each table is resolved to project.dataset by the driver, because INFORMATION_SCHEMA is per dataset.
 const searchColumns: IBaseQueries['searchColumns'] = queryFactory`
+  ${(p: any) => (p.tables || []).filter((t: any) => t.label && t.schema).map((t: any) => `
   SELECT c.column_name AS label,
-    c.table_name AS "table",
+    c.table_name AS \`table\`,
+    c.table_schema AS \`schema\`,
+    '${escapeLiteral(t.database || '')}' AS \`database\`,
     c.data_type AS dataType,
     c.is_nullable AS isNullable,
-    c.is_primary_key AS isPk,
-    '${ContextValue.COLUMN}' as type
-  FROM ${p => p.schema}.${p => p.table}.INFORMATION_SCHEMA.COLUMNS AS c
-  WHERE 1 = 1
-    ${p => p.tables.filter(t => !!t.label).length ? `AND LOWER(c.table_name) IN (${p.tables.filter(t => !!t.label).map(t => `'${t.label}'`.toLowerCase()).join(', ')})` : ''}
-    ${p => p.search ? `AND (
-      LOWER(c.table_name || '.' || c.column_name) LIKE '%${p.search.toLowerCase()}%'
-      OR LOWER(c.column_name) LIKE '%${p.search.toLowerCase()}%'
-    )` : ''}
-  ORDER BY c.table_name ASC,
-    c.ordinal_position ASC
-  LIMIT ${p => p.limit || 100}
+    '${ContextValue.COLUMN}' AS type,
+    c.ordinal_position AS ordinalPosition
+  FROM ${quotePath(t.database, t.schema, 'INFORMATION_SCHEMA', 'COLUMNS')} AS c
+  WHERE c.table_name = '${escapeLiteral(t.label)}'
+    ${p.search ? `AND LOWER(c.column_name) LIKE '%${escapeLiteral(String(p.search).toLowerCase())}%'` : ''}`).join('\n  UNION ALL')}
+  ORDER BY \`table\` ASC, ordinalPosition ASC
+  ${(p: any) => p.completionCatalog ? '' : `LIMIT ${p.limit || 100}`}
 `;
 
 const fetchSchemas: IBaseQueries['fetchSchemas'] = queryFactory`
