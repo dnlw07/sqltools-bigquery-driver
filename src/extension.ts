@@ -80,21 +80,25 @@ export async function activate(extContext: ExtensionContext): Promise<IDriverExt
         const key = `${connectionId}\n${query}`;
         if (key === lastEstimated) return;
         lastEstimated = key;
-        const message: string | undefined = await extension.client.sendRequest('bigquery/EstimateQuery', { connectionId, name: conn.name, query });
-        if (message) {
-          if (message.includes('Estimate unavailable')) lastEstimated = '';
-          const notify = extContext.globalState.get<boolean>(notifyKey) ?? conn.estimateNotification !== false;
-          if (notify) vscode.window.showInformationMessage(message);
-          await vscode.commands.executeCommand('sqltools.addConsoleMessage', message);
+        const message: string | undefined = await extension.client.sendRequest('bigquery/EstimateQuery', {
+          connectionId, name: conn.name, connectionName: conn.name, query,
+        });
+        if (!message) {
+          lastEstimated = '';
+          return;
         }
+        const displayedMessage: string = await vscode.commands.executeCommand(
+          'sqltools.addConsoleMessage', message, conn.name
+        ) || message;
+        const notify = extContext.globalState.get<boolean>(notifyKey) ?? conn.estimateNotification !== false;
+        if (notify) vscode.window.showInformationMessage(displayedMessage);
       };
       extContext.subscriptions.push(vscode.window.onDidChangeTextEditorSelection(event => {
         if (!['sql', 'bqsql'].includes(event.textEditor.document.languageId)) return;
         if (estimateTimer) clearTimeout(estimateTimer);
         estimateTimer = setTimeout(() => {
-          estimateStatementAtCursor(event.textEditor).catch(error => {
+          estimateStatementAtCursor(event.textEditor).catch(() => {
             lastEstimated = '';
-            vscode.commands.executeCommand('sqltools.addConsoleMessage', `Estimate unavailable: ${error instanceof Error ? error.message : String(error)}`);
           });
         }, 700);
       }));

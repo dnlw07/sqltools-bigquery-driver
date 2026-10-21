@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.0.39 - 2026-10-21
+
+- Run each statement of a multi-statement script separately: every statement gets its own result sub-tab and SQLTools Console entry (like the Db2 driver). BEGIN...END, IF/LOOP/WHILE/FOR/REPEAT/CASE blocks and `BEGIN TRANSACTION` are kept intact.
+- A failing statement in a script is reported on its own and the remaining statements still run.
+
+## 0.0.38 - 2026-10-21
+
+- Use SQLTools' shared connection-name prefix for estimate console messages instead of adding a driver-specific prefix.
+- Do not publish unavailable or failed query estimates to the SQLTools Console or notification; only successful scan estimates are shown.
+
 ## 0.0.37 - 2026-10-20
 
 - Support SQLTools' `Expand * to all columns` completion for dataset-qualified and fully project-qualified BigQuery tables. Resolve the project/dataset for metadata lookups and use the table label when fetching columns.

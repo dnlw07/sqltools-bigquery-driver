@@ -10,7 +10,7 @@ const YourDriverPlugin: ILanguageServerPlugin = {
     server.onRequest('bigquery/ConfigureCompletionStorage', async (params: { path: string }) => {
       YourDriver.completionStoragePath = params.path;
     });
-    server.onRequest('bigquery/EstimateQuery', async (params: { connectionId: string; name?: string; query: string }) => {
+    server.onRequest('bigquery/EstimateQuery', async (params: { connectionId: string; name?: string; connectionName?: string; query: string }) => {
       return YourDriver.estimateFor(params.connectionId, params.query, params.name);
     });
     server.onRequest('bigquery/RefreshCompletionCatalog', async () => {

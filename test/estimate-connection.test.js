@@ -12,8 +12,8 @@ test('estimate uses the requested connection even when it was never opened or an
   const dev = make('dev-id', 'dev');
   const prod = make('prod-id', 'prod');
   dev.constructor.openDrivers.add(dev);
-  assert.equal(await BigQueryDriver.estimateFor('prod-id', 'select 1', 'prod'), '[prod] estimate prod');
-  assert.equal(await BigQueryDriver.estimateFor('dev-id', 'select 1', 'dev'), '[dev] estimate dev');
+  assert.equal(await BigQueryDriver.estimateFor('prod-id', 'select 1', 'prod'), 'estimate prod');
+  assert.equal(await BigQueryDriver.estimateFor('dev-id', 'select 1', 'dev'), 'estimate dev');
   await dev.close();
   await prod.close();
 });
@@ -21,7 +21,7 @@ test('estimate uses the requested connection even when it was never opened or an
 test('estimate never falls back to a different connection', async () => {
   const dev = make('dev2-id', 'dev2');
   const message = await BigQueryDriver.estimateFor('other-id', 'select 1', 'other');
-  assert.match(message, /Estimate unavailable/);
+  assert.equal(message, undefined);
   await dev.close();
 });
 
@@ -33,6 +33,6 @@ test('testConnection keeps the driver registered for estimates', async () => {
     return { query: async () => [] };
   };
   await prod.testConnection();
-  assert.equal(await BigQueryDriver.estimateFor('prod3-id', 'select 1', 'prod3'), '[prod3] estimate prod3');
+  assert.equal(await BigQueryDriver.estimateFor('prod3-id', 'select 1', 'prod3'), 'estimate prod3');
   await prod.close();
 });

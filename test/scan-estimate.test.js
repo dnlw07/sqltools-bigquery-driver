@@ -39,9 +39,14 @@ test('supports dry-run metadata without billed-byte statistics', async () => {
   assert.equal(await driver.estimateSql('SELECT 1'), 'Estimated bytes scanned: 500 B.');
 });
 
-test('reports why the estimate is unavailable', async () => {
+test('does not return an estimate when BigQuery has no processed-byte statistics', async () => {
+  const { driver } = setup({ estimate: {} });
+  assert.equal(await driver.estimateSql('SELECT 1'), undefined);
+});
+
+test('returns no estimate when dry-run fails while retaining an internal warning', async () => {
   const { driver } = setup({ estimateError: new Error('permission denied') });
-  assert.match(await driver.estimateSql('SELECT 1'), /Estimate unavailable: permission denied/);
+  assert.equal(await driver.estimateSql('SELECT 1'), undefined);
 });
 
 test('does not run a dry-run or add estimate messages when executing a query', async () => {

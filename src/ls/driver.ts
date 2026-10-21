@@ -12,6 +12,7 @@ import {
 } from "@sqltools/types";
 import { v4 as generateId } from 'uuid';
 import queries from './queries';
+import { splitStatements, isCommentOnlyStatement } from './splitStatements';
 
 const PROCEDURE_TYPE = 'connection.procedure' as ContextValue;
 import { standardizeResult, formatDuration, matchesCompletionName }  from './utils';
@@ -220,13 +221,13 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
     }
   }
 
-  public async estimateSql(query: string): Promise<string> {
+  public async estimateSql(query: string): Promise<string | undefined> {
     try {
       const bigquery = await this.open();
       const metadata = await this._dryRunMetadata(bigquery, query, { location: this.credentials.location });
       const statistics = metadata?.statistics?.query || metadata?.statistics || {};
       const processed = this._formatBytes(statistics.totalBytesProcessed);
-      if (!processed) return 'Estimated bytes scanned: not available for this statement.';
+      if (!processed) return undefined;
       const billed = this._formatBytes(statistics.totalBytesBilled);
       return billed
         ? `Estimated bytes scanned: ${processed} processed, ${billed} billed.`
@@ -234,7 +235,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       this.log.warn(`BigQuery scan-size estimation failed: ${reason}`);
-      return `Estimate unavailable: ${reason}`;
+      return undefined;
     }
   }
 
@@ -245,10 +246,8 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
     const byName = drivers.filter(d => !!name && (d.credentials as any).name === name);
     const candidates = byId.length ? byId : byName;
     const driver = candidates.find(d => this.openDrivers.has(d)) || candidates[0];
-    if (!driver) return `Estimate unavailable: no BigQuery connection "${name || connectionId}" found.`;
-    const message = await driver.estimateSql(query);
-    const label = (driver.credentials as any).name;
-    return label ? `[${label}] ${message}` : message;
+    if (!driver) return undefined;
+    return driver.estimateSql(query);
   }
 
   private _buildConnectionProperties() {
@@ -580,9 +579,39 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
       baseOptions.connectionProperties = connectionProperties;
     }
 
+    const raw = Array.isArray(query) ? query.join('\n') : rawSql;
+    const statements = splitStatements(raw).filter(statement => !isCommentOnlyStatement(statement));
+    if (statements.length <= 1) {
+      return this._runStatement(bigquery, statements[0] || raw, baseOptions, opt, true);
+    }
+
+    // Each statement of a script gets its own result tab and console entry. A failing statement
+    // is reported as its own result so the remaining statements still run.
+    const results: NSDatabase.IResult[] = [];
+    for (const statement of statements) {
+      try {
+        results.push(...await this._runStatement(bigquery, statement, baseOptions, opt, false));
+      } catch (error) {
+        results.push({
+          connId: this.getId(),
+          requestId: opt.requestId,
+          resultId: generateId(),
+          cols: ['Error'],
+          error: true,
+          rawError: error,
+          messages: [{ date: new Date(), message: error instanceof Error ? error.message : String(error) }],
+          query: statement,
+          results: [],
+        } as unknown as NSDatabase.IResult);
+      }
+    }
+    return results;
+  }
+
+  private async _runStatement(bigquery: any, rawSql: string, baseOptions: any, opt: any, canPaginate: boolean): Promise<NSDatabase.IResult[]> {
     const resultsAgg: NSDatabase.IResult[] = [];
 
-    if (!opt.__internal && this._isPaginatableSelect(rawSql)) {
+    if (canPaginate && !opt.__internal && this._isPaginatableSelect(rawSql)) {
       const result = await this._execPaginatedSelect(bigquery, rawSql, baseOptions, opt);
       resultsAgg.push(result);
       return resultsAgg;
