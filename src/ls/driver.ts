@@ -32,6 +32,16 @@ export interface IBigQueryResultEditResponse {
   failedIndex?: number;
 }
 
+// BigQuery renames repeated result columns (SELECT name, * ...) to name_1, name_2; map those back to the real column.
+export function resolveRenamedDuplicate(cols: string[], index: number, knownColumns: Set<string>): string {
+  const name = cols[index];
+  if (knownColumns.has(name.toUpperCase())) return name;
+  const match = name.match(/^(.+)_(\d+)$/);
+  if (!match) return name;
+  const base = cols.slice(0, index).find(col => col.toUpperCase() === match[1].toUpperCase());
+  return base && knownColumns.has(base.toUpperCase()) ? base : name;
+}
+
 export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOptions> implements IConnectionDriver {
   public readonly deps: typeof AbstractDriver.prototype['deps'] = [
     {
@@ -338,7 +348,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
       return { editable: false, nonEditableReason: failed ? 'Unable to resolve table metadata for this result.' : `Result columns cannot be mapped to the source BigQuery table (${projects.join(' | ')}.${schema}.${table}).` };
     }
 
-    const resolvedSources = cols.map((name, index) => ({ index, sourceColumn: name, table, schema }));
+    const resolvedSources = cols.map((_name, index) => ({ index, sourceColumn: resolveRenamedDuplicate(cols, index, knownColumns), table, schema }));
     const missing = resolvedSources.filter(source => !knownColumns.has(String(source.sourceColumn).toUpperCase()));
     if (missing.length) {
       return { editable: false, nonEditableReason: `Result columns cannot be mapped to the source BigQuery table (${project}.${schema}.${table}; unmatched: ${missing.map(m => m.sourceColumn).join(', ')}).` };

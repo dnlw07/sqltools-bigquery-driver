@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.0.40 - 2026-10-21
+
+- Grid editing works when columns are repeated, such as `SELECT name, * FROM t`: BigQuery's renamed copies (`name_1`) are mapped back to the real `name` column.
+
 ## 0.0.39 - 2026-10-21
 
 - Run each statement of a multi-statement script separately: every statement gets its own result sub-tab and SQLTools Console entry (like the Db2 driver). BEGIN...END, IF/LOOP/WHILE/FOR/REPEAT/CASE blocks and `BEGIN TRANSACTION` are kept intact.
