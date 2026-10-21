@@ -2,6 +2,7 @@ import { IBaseQueries, ContextValue} from '@sqltools/types';
 import queryFactory from '@sqltools/base-driver/dist/lib/factory';
 
 const quotePath = (...parts: string[]) => `\`${parts.map(part => String(part).replace(/`/g, '')).join('.') }\``;
+const escapeLiteral = (value: string) => String(value).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 
 const describeTable: IBaseQueries['describeTable'] = queryFactory`
   SELECT 
@@ -39,7 +40,7 @@ const fetchColumns: IBaseQueries['fetchColumns'] = queryFactory`
     data_type AS detail,
     '${ContextValue.COLUMN}' as type
   FROM ${p => quotePath(p.database, p.schema, 'INFORMATION_SCHEMA', 'COLUMNS')}
-  WHERE table_name = '${p => p.table}'
+  WHERE table_name = '${p => escapeLiteral(p.label)}'
   ORDER BY ordinal_position
 `;
 
@@ -128,8 +129,6 @@ const searchSchemas: IBaseQueries['searchTables'] = queryFactory`
   ORDER BY schema_name
   LIMIT ${p => p.limit || 100}
 `;
-
-const escapeLiteral = (value: string) => String(value).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 
 // Each table is resolved to project.dataset by the driver, because INFORMATION_SCHEMA is per dataset.
 const searchColumns: IBaseQueries['searchColumns'] = queryFactory`

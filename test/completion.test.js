@@ -87,6 +87,42 @@ test('unqualified search preserves view flags for shared SQLTools completions', 
   assert.equal(results[0].database, 'test-project');
 });
 
+test('wildcard table lookup uses the project qualifier when present', async () => {
+  const driver = setup();
+  const requests = [];
+  driver.listDatasetTables = async (...args) => {
+    requests.push(args);
+    return [{ label: 'employees', schema: args[0] === 'other-project' ? args[1] : 'hr', database: args[0], type: ContextValue.TABLE }];
+  };
+
+  const results = await driver.searchItems(ContextValue.TABLE, 'employees', {
+    database: 'hr',
+    catalog: 'other-project',
+    limit: 2147483647,
+  });
+
+  assert.deepEqual(requests, [['other-project', 'hr', 'employees']]);
+  assert.equal(results[0].database, 'other-project');
+});
+
+test('table children expose ordered column metadata for wildcard expansion', async () => {
+  const driver = setup();
+  let sql;
+  driver.queryResults = async query => {
+    sql = String(query);
+    return [{ label: 'employee_id', type: ContextValue.COLUMN }];
+  };
+
+  const columns = await driver.getChildrenForItem({
+    item: { label: 'employees', schema: 'hr', database: 'test-project', type: ContextValue.TABLE },
+  });
+
+  assert.match(sql, /FROM `test-project\.hr\.INFORMATION_SCHEMA\.COLUMNS`/);
+  assert.match(sql, /WHERE table_name = 'employees'/);
+  assert.equal(columns[0].label, 'employee_id');
+  assert.equal(columns[0].type, ContextValue.COLUMN);
+});
+
 test('fallback catalog query includes project and view classification', () => {
   const sql = queries.searchTables({ database: 'test-project.hr', search: 'employee' });
   assert.match(sql, /table_catalog AS database/);

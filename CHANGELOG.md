@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.0.37 - 2026-10-20
+
+- Support SQLTools' `Expand * to all columns` completion for dataset-qualified and fully project-qualified BigQuery tables. Resolve the project/dataset for metadata lookups and use the table label when fetching columns.
+
 ## 0.0.36 - 2026-10-19
 
 - Grid editing without primary key columns skips ARRAY/STRUCT/JSON/GEOGRAPHY/RANGE columns when locating the row; the save is still rejected unless the remaining columns match exactly one row. A result with no usable column stays read-only.

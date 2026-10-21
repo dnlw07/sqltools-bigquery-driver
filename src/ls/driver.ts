@@ -934,7 +934,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
       case ContextValue.TABLE:
       case ContextValue.VIEW:
         if (!extraParams.database) return this.searchAllTables(search) as Promise<NSDatabase.SearchableItem[]>;
-        return this.listDatasetTables(await this.getProjectId(), extraParams.database, search) as Promise<NSDatabase.SearchableItem[]>;
+        return this.listDatasetTables(extraParams.catalog || await this.getProjectId(), extraParams.database, search) as Promise<NSDatabase.SearchableItem[]>;
       case ContextValue.FUNCTION:
       case PROCEDURE_TYPE: {
         const projectId = await this.getProjectId();
