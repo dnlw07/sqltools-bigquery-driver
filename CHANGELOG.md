@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.0.41 - 2026-11-08
+
+- Enforce SQLTools blocked SQL patterns for submitted and driver-generated SQL.
+
 ## 0.0.40 - 2026-10-21
 
 - Grid editing works when columns are repeated, such as `SELECT name, * FROM t`: BigQuery's renamed copies (`name_1`) are mapped back to the real `name` column.

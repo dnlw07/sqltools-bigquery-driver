@@ -42,7 +42,37 @@ export function resolveRenamedDuplicate(cols: string[], index: number, knownColu
   return base && knownColumns.has(base.toUpperCase()) ? base : name;
 }
 
+function rethrowPolicyError(error: unknown): void {
+  if (error instanceof Error && error.name === 'SqlExecutionPolicyError') throw error;
+}
+
 export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOptions> implements IConnectionDriver {
+  private sqlExecutionGuard: (sql: string) => void = () => undefined;
+  private rawClients = new WeakMap<object, any>();
+
+  public setSqlExecutionGuard(guard: (sql: string) => void) {
+    this.sqlExecutionGuard = guard;
+  }
+
+  private guardBigQuery(bigquery: any): any {
+    const guarded = new Proxy(bigquery, {
+      get: (target, key) => {
+        const value = Reflect.get(target, key, target);
+        if (typeof value !== 'function') return value;
+        if (key === 'query' || key === 'createQueryJob') {
+          return (...args: any[]) => {
+            const sql = typeof args[0] === 'string' ? args[0] : args[0]?.query;
+            if (typeof sql !== 'string') throw new Error('Cannot validate BigQuery query without SQL text.');
+            this.sqlExecutionGuard(sql);
+            return value.apply(target, args);
+          };
+        }
+        return value.bind(target);
+      },
+    });
+    this.rawClients.set(guarded, bigquery);
+    return guarded;
+  }
   public readonly deps: typeof AbstractDriver.prototype['deps'] = [
     {
       type: AbstractDriver.CONSTANTS.DEPENDENCY_PACKAGE,
@@ -117,7 +147,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
 
     const connection = new Promise<any>((resolve, reject) => {
       try {
-        const bigquery = new BigQuery({ ...connOptions, maxRetries: 10 });
+        const bigquery = this.guardBigQuery(new BigQuery({ ...connOptions, maxRetries: 10 }));
         resolve(bigquery);
       } catch (error) {
         reject(error);
@@ -225,6 +255,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
     try {
       return await run(baseOptions);
     } catch (error) {
+      rethrowPolicyError(error);
       if (!baseOptions?.connectionProperties) throw error;
       const { connectionProperties, ...withoutSession } = baseOptions;
       return run(withoutSession);
@@ -243,6 +274,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
         ? `Estimated bytes scanned: ${processed} processed, ${billed} billed.`
         : `Estimated bytes scanned: ${processed}.`;
     } catch (error) {
+      rethrowPolicyError(error);
       const reason = error instanceof Error ? error.message : String(error);
       this.log.warn(`BigQuery scan-size estimation failed: ${reason}`);
       return undefined;
@@ -307,6 +339,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
       // A view is not listed itself, only its underlying tables, so their projects are fallbacks.
       return [...exact, ...referenced].map(ref => ref.projectId).filter(Boolean);
     } catch (error) {
+      rethrowPolicyError(error);
       return [];
     }
   }
@@ -340,6 +373,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
           break;
         }
       } catch (error) {
+        rethrowPolicyError(error);
         failed = true;
       }
     }
@@ -368,6 +402,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
       const [rows] = await job.getQueryResults();
       primaryKeys = rows.map((row: any) => String(row.column_name).toUpperCase());
     } catch (error) {
+      rethrowPolicyError(error);
       // PK metadata unavailable/not enforced on this table - fall back to full-row matching
       primaryKeys = [];
     }
@@ -435,7 +470,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
   public async applyEdits(edits: IBigQueryResultEdit[], _opt: any = {}): Promise<IBigQueryResultEditResponse> {
     if (!edits.length) return { success: true };
     const quoteIdentifier = (identifier: string) => `\`${identifier.replace(/`/g, '')}\``;
-    const bigquery = await this.open();
+    let bigquery: any;
     const baseOptions: any = { location: this.credentials.location };
     let failedIndex = 0;
     let transactionStarted = false;
@@ -462,6 +497,14 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
         }).join(' AND ');
         return { relation, setClause, whereClause, matchParams, params: { ...params, ...matchParams } };
       });
+      for (const { relation, setClause, whereClause } of prepared) {
+        this.sqlExecutionGuard(`SELECT COUNT(*) AS matching_count FROM ${relation} WHERE ${whereClause}`);
+        this.sqlExecutionGuard(`UPDATE ${relation} SET ${setClause} WHERE ${whereClause}`);
+      }
+      this.sqlExecutionGuard('BEGIN TRANSACTION');
+      this.sqlExecutionGuard('COMMIT TRANSACTION');
+      this.sqlExecutionGuard('ROLLBACK TRANSACTION');
+      bigquery = await this.open();
       await this._ensureSession(bigquery, baseOptions);
       baseOptions.connectionProperties = this._buildConnectionProperties();
       await this._runSessionQuery(bigquery, baseOptions, 'BEGIN TRANSACTION');
@@ -485,7 +528,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
       await this._runSessionQuery(bigquery, baseOptions, 'COMMIT TRANSACTION');
       return { success: true };
     } catch (error) {
-      if (transactionStarted) await this._runSessionQuery(bigquery, baseOptions, 'ROLLBACK TRANSACTION').catch(() => undefined);
+      if (transactionStarted) await this._runSessionQuery(this.rawClients.get(bigquery) || bigquery, baseOptions, 'ROLLBACK TRANSACTION').catch(() => undefined);
       return { success: false, failedIndex, error: error instanceof Error ? error.message : String(error) };
     }
   }
@@ -525,6 +568,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
         total = Number(countRows[0].total);
         exact = true;
       } catch (error) {
+        rethrowPolicyError(error);
         total = estimate;
         exact = false;
       }
@@ -565,7 +609,10 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
       cols,
       connId: this.getId(),
       messages: [{ date: new Date(), message }],
-      ...(await this.resolveResultEditability(bigquery, cols, base, baseOptions).catch(() => ({ editable: false, nonEditableReason: 'Unable to resolve table metadata for this result.' }))),
+      ...(await this.resolveResultEditability(bigquery, cols, base, baseOptions).catch(error => {
+        rethrowPolicyError(error);
+        return { editable: false, nonEditableReason: 'Unable to resolve table metadata for this result.' };
+      })),
       results: standardizedRows,
       query: rawSql,
       requestId: opt.requestId,
@@ -579,6 +626,7 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
   }
 
   public query: (typeof AbstractDriver)['prototype']['query'] = async (query, opt: any = {}) => {
+    this.sqlExecutionGuard(Array.isArray(query) ? query.join('\n') : String(query));
     const bigquery = await this.open();
     const rawSql = String(query);
     const baseOptions: any = {
@@ -666,7 +714,10 @@ export default class BigQueryDriver extends AbstractDriver<DriverLib, DriverOpti
         });
       }
     } else {
-      const editability = await this.resolveResultEditability(bigquery, cols || [], rawSql, baseOptions).catch(() => ({ editable: false, nonEditableReason: 'Unable to resolve table metadata for this result.' }));
+      const editability = await this.resolveResultEditability(bigquery, cols || [], rawSql, baseOptions).catch(error => {
+        rethrowPolicyError(error);
+        return { editable: false, nonEditableReason: 'Unable to resolve table metadata for this result.' };
+      });
       resultsAgg.push({
         cols,
         connId: this.getId(),
